@@ -23,6 +23,8 @@ from app.services.analyzer.mention_extractor import (
 )
 from app.services.analyzer.ranker import calculate_marketing_scores, INDUSTRIES
 from app.services.analyzer.claude_analyzer import analyze_celebrity
+from app.services.blog.content_generator import generate_blog_post
+from app.services.blog.naver_blog import post_to_naver_blog
 
 
 scheduler = AsyncIOScheduler(timezone="Asia/Seoul")
@@ -195,7 +197,75 @@ async def run_weekly_update(week_start: date = None):
                 row.rank = rank
         await db.commit()
 
+        logger.info(f"[스케줄러] 분석 완료: {week_start}")
+
+        # 7. 네이버 블로그 자동 포스팅
+        await _post_weekly_blog(scores, week_start)
+
         logger.info(f"[스케줄러] 주간 업데이트 완료: {week_start}")
+
+
+async def _post_weekly_blog(scores: list, week_start: date):
+    """분석 결과를 네이버 블로그에 자동 포스팅"""
+    try:
+        # 랭킹 데이터 직렬화
+        rankings = [
+            {
+                "rank": i + 1,
+                "name": s.celebrity_name,
+                "score": s.marketing_score,
+                "mention_total": s.mention_total,
+                "sentiment": s.sentiment_avg,
+            }
+            for i, s in enumerate(scores[:10])
+        ]
+
+        # 프로파일 (Claude 분석 결과)
+        profiles = {}
+        async with AsyncSessionLocal() as db:
+            from app.models.celebrity import CelebrityProfile
+            result = await db.execute(
+                select(CelebrityProfile)
+                .where(CelebrityProfile.week_start == week_start)
+            )
+            for profile in result.scalars().all():
+                celeb_name = next(
+                    (s.celebrity_name for s in scores if s.celebrity_id == profile.celebrity_id), ""
+                )
+                if celeb_name:
+                    profiles[celeb_name] = {
+                        "image_tags": profile.image_tags or [],
+                        "summary": profile.personality_summary or "",
+                        "brand_fit": profile.brand_fit_description or "",
+                    }
+
+            # 산업군 랭킹
+            from app.models.celebrity import IndustryRanking as IRModel
+            ir_result = await db.execute(
+                select(IRModel).where(IRModel.week_start == week_start)
+            )
+            industry_raw: dict[str, list] = {}
+            for ir in ir_result.scalars().all():
+                celeb_name = next(
+                    (s.celebrity_name for s in scores if s.celebrity_id == ir.celebrity_id), ""
+                )
+                if celeb_name:
+                    industry_raw.setdefault(ir.industry, []).append(
+                        (celeb_name, ir.fit_score or 0, ir.rank or 0)
+                    )
+
+        blog_post = await generate_blog_post(rankings, profiles, industry_raw, week_start)
+        if not blog_post:
+            return
+
+        result = await post_to_naver_blog(blog_post)
+        if result["success"]:
+            logger.info(f"[블로그] 포스팅 성공: {result['post_url']}")
+        else:
+            logger.warning(f"[블로그] 포스팅 실패: {result['error']}")
+
+    except Exception as e:
+        logger.error(f"[블로그] 포스팅 오류: {e}")
 
 
 def setup_scheduler():

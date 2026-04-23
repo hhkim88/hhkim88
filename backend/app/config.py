@@ -9,6 +9,7 @@ class Settings(BaseSettings):
 
     naver_client_id: str = ""
     naver_client_secret: str = ""
+    naver_refresh_token: str = ""       # 블로그 게시용 OAuth refresh token
 
     instagram_username: str = ""
     instagram_password: str = ""
