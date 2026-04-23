@@ -447,7 +447,7 @@ async def run_demo():
             industry_rankings[industry].append((s["name"], combined, fit))
 
     for industry, label in INDUSTRY_LABELS.items():
-        ranked = sorted(industry_rankings[industry], key=lambda x: x[1], reverse=True)[:3]
+        ranked = sorted(industry_rankings[industry], key=lambda x: x[1], reverse=True)[:5]
         if console:
             names_str = "  ".join(
                 f"[bold cyan]{i+1}위 {n}[/]([dim]{f:.0f}점[/])" for i, (n, _, f) in enumerate(ranked)
@@ -457,8 +457,50 @@ async def run_demo():
             names_str = "  ".join(f"{i+1}위 {n}({f:.0f}점)" for i, (n, _, f) in enumerate(ranked))
             print(f"  {label:<20} {names_str}")
 
-    # ─── 6단계: API 응답 샘플 ─────────────────────────────────────────────────
-    print_h("⑥ API 응답 샘플 (/api/v1/rankings/current)", style="bold yellow")
+    # ─── 6단계: 네이버 블로그 자동 포스팅 샘플 ──────────────────────────────────
+    print_h("⑥ 네이버 블로그 자동 포스팅 샘플 (Claude 생성)", style="bold magenta")
+
+    top1 = scores[0]
+    top1_profile = MOCK_PROFILES.get(top1["name"], DEFAULT_PROFILE)
+    top1_industries = sorted(top1_profile["industry_fit"].items(), key=lambda x: x[1], reverse=True)[:3]
+
+    blog_title = f"[{week_start.strftime('%Y년 %m월 %d일')} 주간] 마케팅 효과 셀럽 TOP 10 분석 — {top1['name']} 1위!"
+
+    blog_summary = (
+        f"이번 주 한국 SNS 셀럽 마케팅 분석 결과, {top1['name']}이(가) 마케팅 점수 "
+        f"{top1['score']:.1f}점으로 1위를 차지했습니다. "
+        f"총 {top1['mention_total']:,}건의 언급과 {top1['sentiment']:.0%}의 긍정 감성으로 "
+        f"전 플랫폼에서 압도적인 존재감을 보였습니다.\n\n"
+        f"■ 1위 {top1['name']} 이미지 분석\n"
+        f"  키워드: {' · '.join(top1_profile['image_tags'])}\n"
+        f"  {top1_profile['summary']}\n\n"
+        f"■ 추천 산업군\n"
+        + "\n".join(f"  {INDUSTRY_LABELS[k]} — 적합도 {v}점" for k, v in top1_industries) +
+        "\n\n■ TOP 10 순위 요약\n"
+        + "\n".join(
+            f"  {rank}위 {s['name']} ({s['score']:.1f}점)"
+            for rank, s in enumerate(scores[:10], 1)
+        )
+    )
+
+    blog_tags = [top1["name"], "셀럽마케팅", "인플루언서", "마케팅분석", "SNS분석", "브랜드마케팅"]
+
+    if console:
+        console.print(Panel(
+            f"[bold yellow]제목:[/] {blog_title}\n\n"
+            f"[bold yellow]태그:[/] {' '.join(f'#{t}' for t in blog_tags)}\n\n"
+            f"[bold yellow]본문 미리보기:[/]\n{blog_summary}",
+            title="[bold]네이버 블로그 게시물 (Claude API 생성)[/]",
+            border_style="magenta",
+            width=90,
+        ))
+    else:
+        print(f"\n[블로그 제목] {blog_title}")
+        print(f"[태그] {' '.join(f'#{t}' for t in blog_tags)}")
+        print(f"\n[본문 미리보기]\n{blog_summary}")
+
+    # ─── 7단계: API 응답 샘플 ─────────────────────────────────────────────────
+    print_h("⑦ API 응답 샘플 (/api/v1/rankings/current)", style="bold yellow")
 
     api_response = {
         "week_start": week_start.isoformat(),
