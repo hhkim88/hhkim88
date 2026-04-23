@@ -7,9 +7,11 @@ class Settings(BaseSettings):
     redis_url: str = "redis://localhost:6379/0"
     anthropic_api_key: str = ""
 
-    naver_client_id: str = ""
+    naver_client_id: str = ""           # 네이버 검색 API용 (선택)
     naver_client_secret: str = ""
-    naver_refresh_token: str = ""       # 블로그 게시용 OAuth refresh token
+
+    naver_username: str = ""            # 블로그 자동 포스팅용 네이버 아이디
+    naver_password: str = ""            # 블로그 자동 포스팅용 네이버 비밀번호
 
     instagram_username: str = ""
     instagram_password: str = ""

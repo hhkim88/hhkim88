@@ -457,47 +457,115 @@ async def run_demo():
             names_str = "  ".join(f"{i+1}위 {n}({f:.0f}점)" for i, (n, _, f) in enumerate(ranked))
             print(f"  {label:<20} {names_str}")
 
-    # ─── 6단계: 네이버 블로그 자동 포스팅 샘플 ──────────────────────────────────
-    print_h("⑥ 네이버 블로그 자동 포스팅 샘플 (Claude 생성)", style="bold magenta")
+    # ─── 6단계: 네이버 블로그 자동 포스팅 전체 본문 ─────────────────────────────
+    print_h("⑥ 네이버 블로그 자동 포스팅 전체 본문 (Claude 생성)", style="bold magenta")
 
     top1 = scores[0]
     top1_profile = MOCK_PROFILES.get(top1["name"], DEFAULT_PROFILE)
-    top1_industries = sorted(top1_profile["industry_fit"].items(), key=lambda x: x[1], reverse=True)[:3]
 
-    blog_title = f"[{week_start.strftime('%Y년 %m월 %d일')} 주간] 마케팅 효과 셀럽 TOP 10 분석 — {top1['name']} 1위!"
+    week_str = week_start.strftime("%Y년 %m월 %d일")
+    blog_title = f"[{week_str} 주간] 한국 SNS 셀럽 마케팅 분석 — {top1['name']} 압도적 1위!"
+    blog_tags = ["셀럽마케팅", "인플루언서마케팅", "마케팅분석", "SNS분석", "브랜드마케팅",
+                 "마케팅트렌드", "셀럽랭킹", "B2C마케팅"]
 
-    blog_summary = (
-        f"이번 주 한국 SNS 셀럽 마케팅 분석 결과, {top1['name']}이(가) 마케팅 점수 "
-        f"{top1['score']:.1f}점으로 1위를 차지했습니다. "
-        f"총 {top1['mention_total']:,}건의 언급과 {top1['sentiment']:.0%}의 긍정 감성으로 "
-        f"전 플랫폼에서 압도적인 존재감을 보였습니다.\n\n"
-        f"■ 1위 {top1['name']} 이미지 분석\n"
-        f"  키워드: {' · '.join(top1_profile['image_tags'])}\n"
-        f"  {top1_profile['summary']}\n\n"
-        f"■ 추천 산업군\n"
-        + "\n".join(f"  {INDUSTRY_LABELS[k]} — 적합도 {v}점" for k, v in top1_industries) +
-        "\n\n■ TOP 10 순위 요약\n"
-        + "\n".join(
-            f"  {rank}위 {s['name']} ({s['score']:.1f}점)"
-            for rank, s in enumerate(scores[:10], 1)
-        )
+    # TOP 10 랭킹 텍스트
+    rank_icons_b = {1: "🥇", 2: "🥈", 3: "🥉"}
+    ranking_lines = "\n".join(
+        f"  {rank_icons_b.get(r, f'{r:2}위')}  {s['name']:<14}  {s['score']:.1f}점  "
+        f"SNS언급 {s['mention_total']:,}건  긍정감성 {s['sentiment']:.0%}"
+        for r, s in enumerate(scores[:10], 1)
     )
 
-    blog_tags = [top1["name"], "셀럽마케팅", "인플루언서", "마케팅분석", "SNS분석", "브랜드마케팅"]
+    # 주목 셀럽 TOP 3 상세
+    top3_detail = ""
+    for r, s in enumerate(scores[:3], 1):
+        p = MOCK_PROFILES.get(s["name"], DEFAULT_PROFILE)
+        icon = rank_icons_b.get(r, str(r))
+        top3_ind = sorted(p["industry_fit"].items(), key=lambda x: x[1], reverse=True)[:3]
+        ind_str = " / ".join(f"{INDUSTRY_LABELS[k]} {v}점" for k, v in top3_ind)
+        top3_detail += (
+            f"\n{icon} {r}위 {s['name']} ({s['score']:.1f}점)\n"
+            f"   이미지: {' · '.join(p['image_tags'])}\n"
+            f"   {p['summary']}\n"
+            f"   추천 산업군: {ind_str}\n"
+            f"   📌 {p['brand_fit']}\n"
+        )
+
+    # 산업군별 TOP 5
+    industry_lines = ""
+    for ind_key, label in INDUSTRY_LABELS.items():
+        ranked = sorted(industry_rankings[ind_key], key=lambda x: x[1], reverse=True)[:5]
+        names = "  ".join(f"{i+1}위 {n}({f:.0f}점)" for i, (n, _, f) in enumerate(ranked))
+        industry_lines += f"\n  {label}\n    {names}\n"
+
+    # 인사이트 (TOP 3 셀럽 기반)
+    insight1_name = scores[0]["name"]
+    insight2_name = scores[3]["name"] if len(scores) > 3 else scores[-1]["name"]
+    p0 = MOCK_PROFILES.get(insight1_name, DEFAULT_PROFILE)
+    best_ind = sorted(p0["industry_fit"].items(), key=lambda x: x[1], reverse=True)[:2]
+    best_ind_str = " · ".join(INDUSTRY_LABELS[k] for k, _ in best_ind)
+
+    blog_body = f"""안녕하세요, 셀럽 마케팅 분석팀입니다 🎯
+
+이번 주 네이버 블로그·카페, 인스타그램, 유튜브 등 주요 SNS 빅데이터를 종합 분석한 결과를 공유드립니다.
+총 15명의 주요 셀럽을 대상으로 ▶언급량(30%) ▶참여율(35%) ▶감성분석(20%) ▶플랫폼다양성(15%)
+4가지 지표를 AI가 종합해 마케팅 효과 점수를 산출했습니다.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📊 이번 주 마케팅 효과 셀럽 TOP 10
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+{ranking_lines}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🔍 주목 셀럽 TOP 3 심층 분석
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+{top3_detail}
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🏭 B2C 산업군별 추천 셀럽 TOP 5
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+{industry_lines}
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+💡 마케터를 위한 핵심 인사이트
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+1. {insight1_name}은 {best_ind_str} 등 전방위에서 고른 마케팅 효과를 보여
+   프리미엄 브랜드 앰배서더로 최적의 선택지입니다.
+
+2. {insight2_name}은 특정 산업군에서 독보적 적합도를 기록하고 있어
+   타겟 캠페인 ROI를 극대화할 수 있습니다.
+
+3. 긍정 감성 비율 상위 셀럽은 브랜드 신뢰도 향상 캠페인에 특히 효과적이며,
+   단순 노출보다 구매 전환율이 높은 경향을 보입니다.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📅 다음 주 트렌드 예측
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+• 글로벌 팬덤 보유 셀럽의 국내 SNS 영향력 지속 확대 예상
+• MZ세대 타겟 뷰티·패션 캠페인 수요 증가
+• 시즌 이벤트 연계 식품·음료 셀럽 마케팅 활성화 전망
+
+본 분석은 SNS 크롤링 데이터와 Claude AI 분석을 기반으로 매주 월요일 자동 업데이트됩니다.
+
+태그: {' '.join('#' + t for t in blog_tags)}"""
 
     if console:
         console.print(Panel(
-            f"[bold yellow]제목:[/] {blog_title}\n\n"
-            f"[bold yellow]태그:[/] {' '.join(f'#{t}' for t in blog_tags)}\n\n"
-            f"[bold yellow]본문 미리보기:[/]\n{blog_summary}",
-            title="[bold]네이버 블로그 게시물 (Claude API 생성)[/]",
+            f"[bold yellow]📝 제목:[/] {blog_title}\n"
+            f"[bold yellow]🏷  태그:[/] {' '.join('#' + t for t in blog_tags)}\n\n"
+            + blog_body,
+            title="[bold]네이버 블로그 자동 게시물 전체 본문[/]",
             border_style="magenta",
             width=90,
         ))
     else:
-        print(f"\n[블로그 제목] {blog_title}")
-        print(f"[태그] {' '.join(f'#{t}' for t in blog_tags)}")
-        print(f"\n[본문 미리보기]\n{blog_summary}")
+        sep = "=" * 70
+        print(f"\n{sep}")
+        print(f"[블로그 제목] {blog_title}")
+        print(f"[태그] {' '.join('#' + t for t in blog_tags)}")
+        print(sep)
+        print(blog_body)
+        print(sep)
 
     # ─── 7단계: API 응답 샘플 ─────────────────────────────────────────────────
     print_h("⑦ API 응답 샘플 (/api/v1/rankings/current)", style="bold yellow")
