@@ -4,7 +4,6 @@ version = "0.1.0"
 description = "Self-hosted company information search backend + Bull/Bear analyst debate system"
 requires-python = ">=3.11"
 dependencies = [
-    "anthropic>=0.40.0",
     "mcp>=1.2.0",
     "requests>=2.32.0",
     "beautifulsoup4>=4.12.0",
@@ -20,6 +19,7 @@ dependencies = [
     "python-dotenv>=1.0.0",
     "feedparser>=6.0.11",
     "tenacity>=9.0.0",
+    "claude-agent-sdk>=0.1.72",
 ]
 
 [project.scripts]

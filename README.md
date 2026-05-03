@@ -5,7 +5,7 @@
 
 ## 두 가지 사용 방식
 
-1. **Standalone 토론 실행**: `uv run python scripts/debate.py 삼성전자 --rounds 3 -o samsung.md`
+1. **Standalone 토론 실행**: `uv run debate 삼성전자 --rounds 3 -o samsung.md`
 2. **Claude Code MCP 통합**: `.mcp.json`에 등록하여 Claude Code에서 자연어로 단일 검색
 
 ## 데이터 소스
@@ -34,11 +34,13 @@ uv sync
 # 2. .env 파일 작성 (.env.example 참고)
 cp .env.example .env
 # 편집 후:
-#   ANTHROPIC_API_KEY=...        (필수, 토론용)
 #   DART_API_KEY=...             (필수, KR 재무용 - opendart.fss.or.kr 무료)
 #   REDDIT_CLIENT_ID/SECRET=...  (선택, US 소셜용 - reddit.com/prefs/apps)
 #   FRED_API_KEY=...             (선택, US 매크로용 - fred.stlouisfed.org)
 #   ECOS_API_KEY=...             (선택, KR 매크로용 - ecos.bok.or.kr)
+#
+# 토론 LLM은 claude-agent-sdk가 로컬 `claude` CLI를 통해 호출하므로
+# Claude Code Max 구독이면 별도 API 키 불필요.
 ```
 
 ## 사용
@@ -63,12 +65,24 @@ uv run python -m company_search ir "삼성전자" --limit 5
 ### 토론 실행
 
 ```bash
-uv run python scripts/debate.py 삼성전자 --market KR --rounds 3 -o samsung.md
-uv run python scripts/debate.py AAPL --market US --rounds 3 -o aapl.md
+# 빠르고 저렴한 검증 (Haiku)
+uv run debate 삼성전자 --market KR --rounds 2 --model claude-haiku-4-5 -o samsung.md
+
+# 기본 (Sonnet 4.6)
+uv run debate 삼성전자 --market KR --rounds 3 -o samsung.md
+
+# 깊이 있는 분석 (Opus, 비용 큼)
+uv run debate AAPL --market US --rounds 3 --model claude-opus-4-7 -o aapl.md
 ```
 
-3라운드 = 개진 → 반박 → 마무리. 각 라운드마다 Bull과 Bear가 발언하고
-마지막에 Moderator가 합의 사실/대립 해석/중장기 투자 질문을 정리합니다.
+라운드 수에 따른 흐름:
+- `rounds=2`: 개진 → 마무리
+- `rounds=3`: 개진 → 반박 → 마무리 (기본값, 권장)
+- `rounds≥4`: 개진 → 반박 × N → 마무리
+
+각 라운드마다 Bull과 Bear가 발언하고 마지막에 Moderator가 합의 사실/대립
+해석/중장기 투자 질문을 구조화 요약으로 정리합니다. 출력 마크다운은 상단에
+Moderator 요약, 하단에 토론 전문 순서로 배치됩니다.
 
 ### Claude Code MCP 등록
 
@@ -108,5 +122,7 @@ Claude Code 재시작 후 자연어로:
 ## 비용
 
 - 검색: **0원** (모두 공개 소스 + SQLite 캐시)
-- 토론: Claude API만. Sonnet 4.6 기준 1회 토론(3라운드) 약 **$0.4~$0.8**
-  (프롬프트 캐싱으로 추가 절감 가능)
+- 토론: Claude Code Max 구독 한도 내에서 추가 비용 없음
+  (`claude-agent-sdk`가 로컬 `claude` CLI subprocess로 호출)
+- API 키로 돌리고 싶다면 `ANTHROPIC_API_KEY`를 환경변수로 설정하면 SDK가
+  자동으로 그쪽으로 라우팅. Sonnet 4.6 기준 1회 토론(3라운드) 약 $0.15~$0.40.
