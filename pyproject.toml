@@ -1,0 +1,37 @@
+[project]
+name = "company-search"
+version = "0.1.0"
+description = "Self-hosted company information search backend + Bull/Bear analyst debate system"
+requires-python = ">=3.11"
+dependencies = [
+    "anthropic>=0.40.0",
+    "mcp>=1.2.0",
+    "requests>=2.32.0",
+    "beautifulsoup4>=4.12.0",
+    "lxml>=5.3.0",
+    "newspaper4k>=0.9.3",
+    "finance-datareader>=0.9.94",
+    "yfinance>=0.2.50",
+    "pypdf>=5.1.0",
+    "praw>=7.8.0",
+    "youtube-transcript-api>=0.6.3",
+    "yt-dlp>=2024.12.0",
+    "vaderSentiment>=3.3.2",
+    "python-dotenv>=1.0.0",
+    "feedparser>=6.0.11",
+    "tenacity>=9.0.0",
+]
+
+[project.scripts]
+company-search = "company_search.cli:main"
+debate = "scripts.debate:main"
+
+[tool.uv]
+package = true
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["company_search", "debate"]
