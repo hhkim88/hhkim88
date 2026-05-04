@@ -8,8 +8,15 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
+
+# On Windows, default subprocess pipe decoding is the system code page (cp949
+# in Korean locales), which corrupts UTF-8 output from child processes such as
+# yt-dlp. Force UTF-8 mode for all child Python processes.
+os.environ.setdefault("PYTHONUTF8", "1")
+os.environ.setdefault("PYTHONIOENCODING", "utf-8")
 
 from dotenv import load_dotenv
 
