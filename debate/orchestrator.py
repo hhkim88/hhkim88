@@ -17,7 +17,9 @@ from claude_agent_sdk import (
     ClaudeAgentOptions,
     ResultMessage,
     SystemMessage,
+    ToolResultBlock,
     ToolUseBlock,
+    UserMessage,
     create_sdk_mcp_server,
     query,
     tool,
@@ -38,6 +40,27 @@ def _wrap(result: Any) -> dict[str, Any]:
     if len(payload) > 25000:
         payload = payload[:25000] + "...[truncated]"
     return {"content": [{"type": "text", "text": payload}]}
+
+
+_FAILURE_HINTS = ("error", "403", "404", "blocked", "not in allowlist", "no data", "empty")
+
+
+def _result_block_is_failure(block: ToolResultBlock) -> bool:
+    if block.is_error:
+        return True
+    content = block.content
+    if content is None:
+        return True
+    if isinstance(content, list):
+        text = " ".join(
+            str(item.get("text", "")) for item in content if isinstance(item, dict)
+        )
+    else:
+        text = str(content)
+    if not text.strip() or text.strip() in {"{}", "[]", "null"}:
+        return True
+    lower = text.lower()
+    return any(hint in lower for hint in _FAILURE_HINTS)
 
 
 @tool(
@@ -173,6 +196,7 @@ async def _agent_run(
     final_text = ""
     new_session = resume_session
     tool_log: list[dict[str, Any]] = []
+    by_use_id: dict[str, dict[str, Any]] = {}
 
     async for msg in query(prompt=user_msg, options=options):
         if isinstance(msg, SystemMessage):
@@ -183,13 +207,31 @@ async def _agent_run(
         elif isinstance(msg, AssistantMessage):
             for block in msg.content:
                 if isinstance(block, ToolUseBlock):
-                    tool_log.append(
-                        {"name": block.name, "input": block.input, "ok": True}
-                    )
+                    entry = {
+                        "id": block.id,
+                        "name": block.name,
+                        "input": block.input,
+                        "ok": None,  # filled in when ToolResultBlock arrives
+                    }
+                    tool_log.append(entry)
+                    by_use_id[block.id] = entry
+        elif isinstance(msg, UserMessage):
+            content = msg.content
+            if isinstance(content, list):
+                for block in content:
+                    if isinstance(block, ToolResultBlock):
+                        entry = by_use_id.get(block.tool_use_id)
+                        if entry is not None:
+                            entry["ok"] = not _result_block_is_failure(block)
         elif isinstance(msg, ResultMessage):
             result_text = getattr(msg, "result", None)
             if result_text:
                 final_text = result_text
+
+    # Any ToolUseBlock without a matching ToolResultBlock = unknown / treated as failure
+    for entry in tool_log:
+        if entry["ok"] is None:
+            entry["ok"] = False
 
     return final_text, new_session, tool_log
 
