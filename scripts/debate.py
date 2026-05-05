@@ -20,7 +20,11 @@ os.environ.setdefault("PYTHONIOENCODING", "utf-8")
 
 from dotenv import load_dotenv
 
-load_dotenv()
+# encoding='utf-8-sig' silently strips a UTF-8 BOM if present. PowerShell's
+# `Out-File -Encoding utf8` writes a BOM, which otherwise leaves the first
+# variable name like '﻿DART_API_KEY' and os.environ.get('DART_API_KEY')
+# returns nothing.
+load_dotenv(encoding="utf-8-sig")
 
 
 def main(argv: list[str] | None = None) -> int:

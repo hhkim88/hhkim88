@@ -60,7 +60,7 @@ def extract_citations(text: str) -> list[Citation]:
 @dataclass
 class VerifiedCitation:
     citation: Citation
-    status: str  # "verified" | "partial" | "suspect"
+    status: str  # "verified" | "partial" | "internal" | "suspect"
     matched_source_name: str | None = None
     matched_title: str | None = None
     matched_url: str | None = None
@@ -69,6 +69,35 @@ class VerifiedCitation:
 
 def _norm(s: str) -> str:
     return re.sub(r"\s+", " ", (s or "").strip()).lower()
+
+
+# Substrings that indicate the citation is referring to one of our own internal
+# data tools rather than an external item from the collect pool. These citations
+# are not hallucinations — the agent is just citing the data tool it called —
+# but they shouldn't be matched against the external pool either.
+_INTERNAL_TOOL_MARKERS = (
+    "mcp__debate__",
+    "get_price_history",
+    "get_financials",
+    "get_analyst_consensus",
+    "get_secondary_reports",
+    "get_youtube_analysis",
+    "get_social_buzz",
+    "get_ir_materials",
+    "get_public_reports",
+    "search_company_news",
+    "collect_existing_arguments",
+    "finance.naver.com",
+    "네이버 파이낸스",
+    "네이버 npay",
+    "데이터 검증",
+    "ohlcv",
+)
+
+
+def _is_internal_tool_reference(raw_label: str, url: str | None) -> bool:
+    haystack = f"{raw_label} {url or ''}".lower()
+    return any(marker in haystack for marker in _INTERNAL_TOOL_MARKERS)
 
 
 def verify_citations(
@@ -94,6 +123,19 @@ def verify_citations(
 
     out: list[VerifiedCitation] = []
     for c in citations:
+        # Pre-check: is the citation pointing at one of our internal data
+        # tools? If so, don't run the external-pool match — it would always
+        # come back as suspect and be confused with hallucination.
+        if _is_internal_tool_reference(c.raw, c.url):
+            out.append(
+                VerifiedCitation(
+                    citation=c,
+                    status="internal",
+                    notes=["내부 도구 결과를 출처로 인용 (외부 풀과 무관)"],
+                )
+            )
+            continue
+
         status = "suspect"
         match = None
         notes: list[str] = []
@@ -171,13 +213,16 @@ def render_verification_report(
     """Render a programmatic verification section as markdown."""
 
     def _icon(status: str) -> str:
-        return {"verified": "✅", "partial": "⚠️", "suspect": "❌"}.get(status, "?")
+        return {"verified": "✅", "partial": "⚠️", "internal": "⚙️", "suspect": "❌"}.get(
+            status, "?"
+        )
 
-    def _summary(verified: list[VerifiedCitation]) -> tuple[int, int, int]:
+    def _summary(verified: list[VerifiedCitation]) -> tuple[int, int, int, int]:
         v = sum(1 for x in verified if x.status == "verified")
         p = sum(1 for x in verified if x.status == "partial")
+        i = sum(1 for x in verified if x.status == "internal")
         s = sum(1 for x in verified if x.status == "suspect")
-        return v, p, s
+        return v, p, i, s
 
     def _diversity(pool: list[dict[str, Any]]) -> str:
         dist = source_type_distribution(pool)
@@ -191,20 +236,27 @@ def render_verification_report(
     lines.append("")
     lines.append("- ✅ **verified**: URL 또는 source_name이 풀의 항목과 일치")
     lines.append("- ⚠️ **partial**: 인용 주체명이 풀 항목의 본문에서만 발견 (간접 인용)")
+    lines.append("- ⚙️ **internal**: 내부 도구 결과(get_price_history 등) 자기참조 — 환각 아님")
     lines.append("- ❌ **suspect**: 풀 어디에도 매칭 없음 — 학습 데이터 또는 환각 가능성")
+    lines.append("")
+    lines.append(
+        "_검증율 = (verified + partial) ÷ (suspect 포함 외부 인용 합계). "
+        "internal은 외부 인용이 아니므로 분모에서 제외._"
+    )
     lines.append("")
 
     for label, pool, verified in [
         ("🐂 Bull", bull_pool, bull_verified),
         ("🐻 Bear", bear_pool, bear_verified),
     ]:
-        v, p, s = _summary(verified)
-        total = max(len(verified), 1)
+        v, p, i, s = _summary(verified)
+        external_total = v + p + s
+        rate = f"{(v + p) * 100 // external_total}%" if external_total else "N/A"
         lines.append(f"### {label}")
         lines.append("")
         lines.append(
-            f"- 인용 총 **{len(verified)}건**: ✅ {v} / ⚠️ {p} / ❌ {s} "
-            f"(검증율 {(v + p) * 100 // total}%)"
+            f"- 인용 총 **{len(verified)}건**: ✅ {v} / ⚠️ {p} / ⚙️ {i} / ❌ {s} "
+            f"(외부 검증율 {rate})"
         )
         lines.append(f"- 외부 풀 항목 수: **{len(pool)}**개")
         lines.append(f"- 출처 다양성: {_diversity(pool)}")
