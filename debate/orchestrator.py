@@ -49,25 +49,68 @@ def _wrap(result: Any) -> dict[str, Any]:
     return {"content": [{"type": "text", "text": payload}]}
 
 
-_FAILURE_HINTS = ("error", "403", "404", "blocked", "not in allowlist", "no data", "empty")
+_FAILURE_HINTS = ("403 client error", "404 client error", "host not in allowlist",
+                  "forbidden for url", "no data found", "invalid symbol")
+
+
+def _block_text(block: ToolResultBlock) -> str:
+    content = block.content
+    if content is None:
+        return ""
+    if isinstance(content, list):
+        return " ".join(
+            str(item.get("text", "")) for item in content if isinstance(item, dict)
+        )
+    return str(content)
+
+
+_PAYLOAD_KEYS = ("items", "data", "summary", "body", "body_md", "rows", "results")
+_META_KEYS = ("company", "market", "stance", "ticker", "counts", "errors", "note")
+
+
+def _structured_is_substantive(data: Any) -> bool:
+    """True if a parsed JSON value carries real, quotable content."""
+    if isinstance(data, list):
+        meaningful = [d for d in data if not (isinstance(d, dict) and "error" in d and len(d) <= 2)]
+        return len(meaningful) > 0
+    if isinstance(data, dict):
+        # If the response uses any standard payload key, those keys decide.
+        payload_keys = [k for k in _PAYLOAD_KEYS if k in data]
+        if payload_keys:
+            for k in payload_keys:
+                v = data[k]
+                if isinstance(v, list) and len(v) > 0:
+                    return True
+                if isinstance(v, dict) and len(v) > 0:
+                    return True
+                if isinstance(v, str) and len(v) > 80:
+                    return True
+            return False  # all payload keys present but empty
+        if "error" in data and len(data) <= 2:
+            return False
+        non_meta = [k for k in data if k not in _META_KEYS]
+        return len(non_meta) > 0
+    return False
 
 
 def _result_block_is_failure(block: ToolResultBlock) -> bool:
     if block.is_error:
         return True
-    content = block.content
-    if content is None:
+    text = _block_text(block).strip()
+    if not text or text in {"{}", "[]", "null"}:
         return True
-    if isinstance(content, list):
-        text = " ".join(
-            str(item.get("text", "")) for item in content if isinstance(item, dict)
-        )
-    else:
-        text = str(content)
-    if not text.strip() or text.strip() in {"{}", "[]", "null"}:
-        return True
-    lower = text.lower()
-    return any(hint in lower for hint in _FAILURE_HINTS)
+    # If the result parses as JSON, trust the structural verdict — don't
+    # fall back to substring matching, otherwise per-source error notes in
+    # an otherwise-successful aggregator response will produce false negatives.
+    try:
+        data = json.loads(text)
+    except (json.JSONDecodeError, ValueError):
+        # Plain text: short content or known failure phrases mean failure
+        if len(text) < 80:
+            return True
+        lower = text.lower()
+        return any(hint in lower for hint in _FAILURE_HINTS)
+    return not _structured_is_substantive(data)
 
 
 @tool(
@@ -257,8 +300,14 @@ async def _agent_run(
                         entry = by_use_id.get(block.tool_use_id)
                         if entry is not None:
                             entry["ok"] = not _result_block_is_failure(block)
-                            if entry["name"] == collect_tool_full and entry["ok"]:
-                                collect_items.extend(_parse_collect_items(block.content))
+                            # Always try to recover items from the collect tool —
+                            # even if the call's status flapped to failure for some
+                            # other reason, the items array (if present) is useful.
+                            if entry["name"] == collect_tool_full:
+                                items = _parse_collect_items(block.content)
+                                if items:
+                                    collect_items.extend(items)
+                                    entry["ok"] = True
         elif isinstance(msg, ResultMessage):
             result_text = getattr(msg, "result", None)
             if result_text:
