@@ -27,6 +27,7 @@ from claude_agent_sdk import (
 
 from .personas import BEAR_SYSTEM, BULL_SYSTEM, MODERATOR_SYSTEM, ROUND_INSTRUCTIONS
 from .tools import dispatch as tool_dispatch
+from .argument_collector import collect_existing_arguments as _collect_args
 
 DEFAULT_MODEL = os.environ.get("DEBATE_MODEL", "claude-sonnet-4-6")
 MODERATOR_MODEL = os.environ.get("MODERATOR_MODEL", "claude-haiku-4-5")
@@ -144,7 +145,26 @@ async def t_get_public_reports(args):
     return _wrap(tool_dispatch("get_public_reports", args))
 
 
+@tool(
+    "collect_existing_arguments",
+    "강세/약세 외부 주장을 한 번에 수집한다. stance에 맞춰 뉴스 키워드를 편향시키고 "
+    "secondary 리포트 인용 기사 / 한경 컨센서스 PDF (KR) / 유튜브 분석 / 종토방·Reddit "
+    "글을 정규화된 형태로 묶어 반환. 토론 첫 턴에 반드시 호출해서 자체 합성이 아닌 "
+    "실재 주장을 인용·반박할 것.",
+    {"company": str, "market": str, "stance": str, "per_source_limit": int},
+)
+async def t_collect_existing_arguments(args):
+    out = _collect_args(
+        args["company"],
+        market=args.get("market", "KR"),
+        stance=args.get("stance", "bull"),
+        per_source_limit=args.get("per_source_limit", 4),
+    )
+    return _wrap(out)
+
+
 _TOOLS = [
+    t_collect_existing_arguments,
     t_search_company_news,
     t_get_financials,
     t_get_price_history,
