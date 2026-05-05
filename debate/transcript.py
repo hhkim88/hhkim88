@@ -10,6 +10,7 @@ ROLE_HEADER = {
     "bull": "🐂 Bull 애널리스트",
     "bear": "🐻 Bear 애널리스트",
     "moderator": "⚖️ Moderator",
+    "verification": "🔍 인용 검증",
 }
 
 KIND_LABEL = {
@@ -17,19 +18,22 @@ KIND_LABEL = {
     "rebut": "반박",
     "close": "마무리",
     "moderate": "종합",
+    "verify": "검증",
 }
 
 
 def to_markdown(company: str, market: str, transcript: list[AgentTurn]) -> str:
-    """Render transcript with structured summary at top, full debate log below."""
+    """Render transcript with structured summary + verification report at top,
+    full debate log below."""
     parts = [
         f"# Bull vs Bear 토론: {company} ({market})",
         f"_{datetime.utcnow().isoformat(timespec='seconds')}Z_",
         "",
     ]
 
-    # Section 1: structured summary (moderator output) - shown first
     moderator_turn = next((t for t in transcript if t.role == "moderator"), None)
+    verification_turn = next((t for t in transcript if t.role == "verification"), None)
+
     if moderator_turn:
         parts.append("---")
         parts.append("## ⚖️ 사회자 종합 (요약)")
@@ -39,11 +43,16 @@ def to_markdown(company: str, market: str, transcript: list[AgentTurn]) -> str:
         parts.append("---")
         parts.append("")
 
-    # Section 2: full debate log (free-form back-and-forth)
+    if verification_turn:
+        parts.append(verification_turn.text)
+        parts.append("")
+        parts.append("---")
+        parts.append("")
+
     parts.append("## 📝 토론 전문 (자유 논쟁)")
     parts.append("")
     for turn in transcript:
-        if turn.role == "moderator":
+        if turn.role in ("moderator", "verification"):
             continue
         header = ROLE_HEADER.get(turn.role, turn.role)
         kind = KIND_LABEL.get(turn.round_kind, turn.round_kind)

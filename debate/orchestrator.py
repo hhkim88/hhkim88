@@ -28,6 +28,12 @@ from claude_agent_sdk import (
 from .personas import BEAR_SYSTEM, BULL_SYSTEM, MODERATOR_SYSTEM, ROUND_INSTRUCTIONS
 from .tools import dispatch as tool_dispatch
 from .argument_collector import collect_existing_arguments as _collect_args
+from .citation import (
+    extract_citations,
+    render_verification_report,
+    source_type_distribution,
+    verify_citations,
+)
 
 DEFAULT_MODEL = os.environ.get("DEBATE_MODEL", "claude-sonnet-4-6")
 MODERATOR_MODEL = os.environ.get("MODERATOR_MODEL", "claude-haiku-4-5")
@@ -184,9 +190,9 @@ _ALLOWED_TOOLS = [f"mcp__{_MCP_NAME}__{t.name}" for t in _TOOLS]
 
 @dataclass
 class AgentTurn:
-    role: str  # "bull" | "bear" | "moderator"
+    role: str  # "bull" | "bear" | "moderator" | "verification"
     round_idx: int
-    round_kind: str  # "open" | "rebut" | "close" | "moderate"
+    round_kind: str  # "open" | "rebut" | "close" | "moderate" | "verify"
     text: str
     tool_calls: list[dict[str, Any]] = field(default_factory=list)
 
@@ -197,8 +203,14 @@ async def _agent_run(
     resume_session: str | None,
     model: str,
     use_tools: bool = True,
-) -> tuple[str, str | None, list[dict[str, Any]]]:
-    """Run one agent turn. Returns (final_text, session_id_for_next_turn, tool_log)."""
+) -> tuple[str, str | None, list[dict[str, Any]], list[dict[str, Any]]]:
+    """Run one agent turn.
+
+    Returns:
+        (final_text, session_id_for_next_turn, tool_log, collect_args_items)
+        where collect_args_items is the concatenated `items` array from any
+        `collect_existing_arguments` tool calls made during this turn.
+    """
     options_kwargs: dict[str, Any] = {
         "system_prompt": system,
         "model": model,
@@ -217,6 +229,8 @@ async def _agent_run(
     new_session = resume_session
     tool_log: list[dict[str, Any]] = []
     by_use_id: dict[str, dict[str, Any]] = {}
+    collect_items: list[dict[str, Any]] = []
+    collect_tool_full = f"mcp__{_MCP_NAME}__collect_existing_arguments"
 
     async for msg in query(prompt=user_msg, options=options):
         if isinstance(msg, SystemMessage):
@@ -231,7 +245,7 @@ async def _agent_run(
                         "id": block.id,
                         "name": block.name,
                         "input": block.input,
-                        "ok": None,  # filled in when ToolResultBlock arrives
+                        "ok": None,
                     }
                     tool_log.append(entry)
                     by_use_id[block.id] = entry
@@ -243,17 +257,38 @@ async def _agent_run(
                         entry = by_use_id.get(block.tool_use_id)
                         if entry is not None:
                             entry["ok"] = not _result_block_is_failure(block)
+                            if entry["name"] == collect_tool_full and entry["ok"]:
+                                collect_items.extend(_parse_collect_items(block.content))
         elif isinstance(msg, ResultMessage):
             result_text = getattr(msg, "result", None)
             if result_text:
                 final_text = result_text
 
-    # Any ToolUseBlock without a matching ToolResultBlock = unknown / treated as failure
     for entry in tool_log:
         if entry["ok"] is None:
             entry["ok"] = False
 
-    return final_text, new_session, tool_log
+    return final_text, new_session, tool_log, collect_items
+
+
+def _parse_collect_items(content: Any) -> list[dict[str, Any]]:
+    """Extract the `items` array from a collect_existing_arguments tool result."""
+    if isinstance(content, list):
+        text = " ".join(
+            str(item.get("text", "")) for item in content if isinstance(item, dict)
+        )
+    elif isinstance(content, str):
+        text = content
+    else:
+        return []
+    try:
+        data = json.loads(text)
+    except (json.JSONDecodeError, ValueError):
+        return []
+    if isinstance(data, dict):
+        items = data.get("items", [])
+        return items if isinstance(items, list) else []
+    return []
 
 
 async def _run_debate_async(
@@ -267,6 +302,8 @@ async def _run_debate_async(
     bear_session: str | None = None
     last_bull_text = ""
     last_bear_text = ""
+    bull_pool: list[dict[str, Any]] = []  # collect_existing_arguments items, accumulated across rounds
+    bear_pool: list[dict[str, Any]] = []
 
     if rounds >= 2:
         round_kinds = ["open"] + ["rebut"] * (rounds - 2) + ["close"]
@@ -283,9 +320,10 @@ async def _run_debate_async(
                 f"\n\n방금 Bear 애널리스트가 다음과 같이 주장했습니다:\n"
                 f"---\n{last_bear_text[:3000]}\n---"
             )
-        bull_text, bull_session, bull_tools = await _agent_run(
+        bull_text, bull_session, bull_tools, bull_round_items = await _agent_run(
             BULL_SYSTEM, bull_prompt, bull_session, model
         )
+        bull_pool.extend(bull_round_items)
         transcript.append(
             AgentTurn(role="bull", round_idx=i, round_kind=kind, text=bull_text, tool_calls=bull_tools)
         )
@@ -297,23 +335,52 @@ async def _run_debate_async(
                 f"\n\n방금 Bull 애널리스트가 다음과 같이 주장했습니다:\n"
                 f"---\n{last_bull_text[:3000]}\n---"
             )
-        bear_text, bear_session, bear_tools = await _agent_run(
+        bear_text, bear_session, bear_tools, bear_round_items = await _agent_run(
             BEAR_SYSTEM, bear_prompt, bear_session, model
         )
+        bear_pool.extend(bear_round_items)
         transcript.append(
             AgentTurn(role="bear", round_idx=i, round_kind=kind, text=bear_text, tool_calls=bear_tools)
         )
         last_bear_text = bear_text
+
+    # Programmatic citation extraction + verification (deterministic, not LLM)
+    bull_full_text = "\n\n".join(t.text for t in transcript if t.role == "bull")
+    bear_full_text = "\n\n".join(t.text for t in transcript if t.role == "bear")
+    bull_cites = extract_citations(bull_full_text)
+    bear_cites = extract_citations(bear_full_text)
+    bull_verified = verify_citations(bull_cites, bull_pool)
+    bear_verified = verify_citations(bear_cites, bear_pool)
+
+    # Build a structured manifest for the moderator so it can produce the
+    # citation-tracking table (C). The moderator sees the verification results
+    # too — but the report we APPEND below is generated by code, not the LLM.
+    bull_cite_lines = [f"  {idx + 1}. {vc.citation.raw}" for idx, vc in enumerate(bull_verified)]
+    bear_cite_lines = [f"  {idx + 1}. {vc.citation.raw}" for idx, vc in enumerate(bear_verified)]
+    bull_dist = source_type_distribution(bull_pool)
+    bear_dist = source_type_distribution(bear_pool)
+    manifest = (
+        "## 자동 추출된 인용 (사회자 참고용)\n\n"
+        f"Bull 인용 {len(bull_cites)}건:\n"
+        + ("\n".join(bull_cite_lines) if bull_cite_lines else "  (없음)")
+        + f"\n\nBear 인용 {len(bear_cites)}건:\n"
+        + ("\n".join(bear_cite_lines) if bear_cite_lines else "  (없음)")
+        + f"\n\nBull 외부 풀 분포: {bull_dist or '없음'}"
+        + f"\n\nBear 외부 풀 분포: {bear_dist or '없음'}"
+    )
 
     full_dialogue = "\n\n".join(
         f"### Round {t.round_idx} - {t.role.upper()}\n{t.text}" for t in transcript
     )
     mod_prompt = (
         f"기업: **{company}** (시장: {market})\n\n"
-        f"아래는 Bull과 Bear 애널리스트의 토론 전문입니다. 정해진 형식대로 정리하세요.\n\n"
+        f"아래는 Bull과 Bear 애널리스트의 토론 전문입니다. 정해진 형식대로 정리하세요.\n"
+        f"특히 **인용 추적 표**(어느 측이 인용한 외부 주장이 상대방에 의해 반박/수용되었는지)를 "
+        f"포함해야 합니다.\n\n"
+        f"{manifest}\n\n"
         f"---\n{full_dialogue}\n---"
     )
-    mod_text, _, _ = await _agent_run(
+    mod_text, _, _, _ = await _agent_run(
         MODERATOR_SYSTEM, mod_prompt, None, MODERATOR_MODEL, use_tools=False
     )
     transcript.append(
@@ -322,6 +389,19 @@ async def _run_debate_async(
             round_idx=len(round_kinds) + 1,
             round_kind="moderate",
             text=mod_text,
+        )
+    )
+
+    # Programmatic verification report (independent of LLM output)
+    verification_md = render_verification_report(
+        bull_pool, bear_pool, bull_verified, bear_verified
+    )
+    transcript.append(
+        AgentTurn(
+            role="verification",
+            round_idx=len(round_kinds) + 2,
+            round_kind="verify",
+            text=verification_md,
         )
     )
     return transcript
