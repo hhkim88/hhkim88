@@ -56,9 +56,76 @@ def find_corp_code(company_name: str) -> str | None:
     return None
 
 
-@cache.cached("dart:financials", ttl=24 * 3600)
+@cache.cached("dart:shares:v1", ttl=24 * 3600)
+def get_shares_outstanding(company_name: str, year: int) -> dict[str, Any]:
+    """Total issued shares from DART stockTotqySttus.json.
+
+    Needed for valuation ratios (PER, PBR, market-cap). Without this,
+    moderator-side recommendations have to guess share counts and end up
+    with wildly wrong PER. We fetch and split by class so callers can
+    decide whether to use common-only or total.
+    """
+    corp_code = find_corp_code(company_name)
+    if not corp_code:
+        return {"company": company_name, "year": year, "error": "corp_code not found"}
+    r = requests.get(
+        f"{OPENDART_BASE}/stockTotqySttus.json",
+        params={
+            "crtfc_key": _api_key(),
+            "corp_code": corp_code,
+            "bsns_year": str(year),
+            "reprt_code": "11011",  # annual report
+        },
+        timeout=30,
+    )
+    r.raise_for_status()
+    data = r.json()
+    rows = data.get("list", []) or []
+
+    common_shares = 0
+    preferred_shares = 0
+    by_class: list[dict[str, Any]] = []
+    for row in rows:
+        se = (row.get("se") or "").strip()
+        # DART exposes the issued total under different keys depending on
+        # report version; cover both common variants.
+        raw = row.get("istc_totqy") or row.get("isu_stock_totqy") or "0"
+        try:
+            count = int(str(raw).replace(",", "").strip() or "0")
+        except ValueError:
+            count = 0
+        if not count:
+            continue
+        by_class.append({"class": se, "issued": count})
+        if "보통주" in se:
+            common_shares = max(common_shares, count)
+        elif "우선" in se:
+            preferred_shares = max(preferred_shares, count)
+
+    # Fallback: if nothing matched 보통주/우선, take the largest single-row count
+    total_shares = common_shares + preferred_shares
+    if total_shares == 0 and by_class:
+        total_shares = max(c["issued"] for c in by_class)
+        if common_shares == 0:
+            common_shares = total_shares
+
+    return {
+        "company": company_name,
+        "corp_code": corp_code,
+        "year": year,
+        "status": data.get("status"),
+        "message": data.get("message"),
+        "common_shares": common_shares,
+        "preferred_shares": preferred_shares,
+        "total_shares": total_shares,
+        "by_class": by_class,
+    }
+
+
+@cache.cached("dart:financials:v2", ttl=24 * 3600)
 def get_annual_financials(company_name: str, year: int) -> dict[str, Any]:
-    """Single-year consolidated annual financials (사업보고서)."""
+    """Single-year consolidated annual financials (사업보고서) plus shares
+    outstanding so the caller can compute PER / PBR / market-cap directly."""
     corp_code = find_corp_code(company_name)
     if not corp_code:
         return {"company": company_name, "year": year, "error": "corp_code not found"}
@@ -93,6 +160,29 @@ def get_annual_financials(company_name: str, year: int) -> dict[str, Any]:
             except ValueError:
                 continue
             summary[keep_keys[nm]] = amt
+
+    # Best-effort: pull shares outstanding from the dedicated DART endpoint.
+    # Failure here must not break the financials call.
+    shares_block: dict[str, Any] = {}
+    try:
+        shares = get_shares_outstanding(company_name, year)
+        if isinstance(shares, dict) and shares.get("total_shares"):
+            shares_block = {
+                "common_shares": shares.get("common_shares") or 0,
+                "preferred_shares": shares.get("preferred_shares") or 0,
+                "total_shares": shares.get("total_shares") or 0,
+            }
+    except Exception as exc:
+        shares_block = {"shares_error": str(exc)[:200]}
+
+    # Quick derived metrics so the moderator doesn't have to estimate.
+    derived: dict[str, Any] = {}
+    common = shares_block.get("common_shares") or 0
+    if common and summary.get("net_income"):
+        derived["eps_krw"] = summary["net_income"] / common
+    if common and summary.get("total_equity"):
+        derived["bps_krw"] = summary["total_equity"] / common
+
     return {
         "company": company_name,
         "corp_code": corp_code,
@@ -100,6 +190,8 @@ def get_annual_financials(company_name: str, year: int) -> dict[str, Any]:
         "status": data.get("status"),
         "message": data.get("message"),
         "summary_krw": summary,
+        "shares_outstanding": shares_block,
+        "per_share_krw": derived,
         "raw_count": len(rows),
     }
 
