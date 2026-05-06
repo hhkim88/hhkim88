@@ -68,7 +68,10 @@ class VerifiedCitation:
 
 
 def _norm(s: str) -> str:
-    return re.sub(r"\s+", " ", (s or "").strip()).lower()
+    s = re.sub(r"\s+", " ", (s or "").strip()).lower()
+    # Trailing punctuation should not change identity — '@understanding.' and
+    # '@understanding' should match each other.
+    return s.rstrip(".,;:")
 
 
 # Substrings that indicate the citation is referring to one of our own internal
@@ -101,6 +104,16 @@ _INTERNAL_TOOL_MARKERS = (
     "재무데이터",
     "전자공시",
     "사업연도 영업이익",
+    # Price-history citations like "주가 데이터 (005930, 180일 실적)" come
+    # from get_price_history; they're a self-reference, not a hallucinated
+    # external claim.
+    "주가 데이터",
+    "180일 실적",
+    "365일 실적",
+    "180일 데이터",
+    "365일 데이터",
+    "180일 ohlcv",
+    "365일 ohlcv",
 )
 
 

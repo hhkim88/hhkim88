@@ -43,7 +43,12 @@ def get(key: str, ttl: int = DEFAULT_TTL_SECONDS, db_path: Path = DEFAULT_DB_PAT
     fetched_at, payload = row
     if time.time() - fetched_at > ttl:
         return None
-    return json.loads(payload)
+    parsed = json.loads(payload)
+    # If a previous build saved a failure payload (older code did this),
+    # treat it as a miss so the caller retries with the current code path.
+    if _is_failure_payload(parsed):
+        return None
+    return parsed
 
 
 def set(key: str, value: Any, db_path: Path = DEFAULT_DB_PATH) -> None:
