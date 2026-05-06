@@ -462,8 +462,8 @@ async def _run_debate_async(
     bear_full_text = "\n\n".join(t.text for t in transcript if t.role == "bear")
     bull_cites = extract_citations(bull_full_text)
     bear_cites = extract_citations(bear_full_text)
-    bull_verified = verify_citations(bull_cites, bull_pool)
-    bear_verified = verify_citations(bear_cites, bear_pool)
+    bull_verified = verify_citations(bull_cites, bull_pool, company=company)
+    bear_verified = verify_citations(bear_cites, bear_pool, company=company)
 
     # Build a structured manifest for the moderator so it can produce the
     # citation-tracking table (C). The moderator sees the verification results

@@ -122,14 +122,81 @@ def _is_internal_tool_reference(raw_label: str, url: str | None) -> bool:
     return any(marker in haystack for marker in _INTERNAL_TOOL_MARKERS)
 
 
+def _date_compatible(citation_date: str | None, item_date: str) -> bool:
+    """Loose date compatibility check. Citation has '2026-01-15' or
+    '2026.01.15' or '2026년 1월 15일'. Item published_at is usually
+    ISO 8601 like '2026-01-15T10:30:00'."""
+    if not citation_date or not item_date:
+        return False
+    cd = re.sub(r"[^\d]", "-", citation_date).strip("-")
+    id_norm = re.sub(r"[^\d]", "-", str(item_date).split("T")[0]).strip("-")
+    if not cd or not id_norm:
+        return False
+    cd_parts = [p for p in cd.split("-") if p]
+    id_parts = [p for p in id_norm.split("-") if p]
+    if len(cd_parts) < 3 or len(id_parts) < 3:
+        return False
+    return cd_parts[0] == id_parts[0] and (
+        cd_parts[1].lstrip("0") == id_parts[1].lstrip("0")
+        and cd_parts[2].lstrip("0") == id_parts[2].lstrip("0")
+    )
+
+
+def _score_candidate(
+    citation: Citation,
+    item: dict[str, Any],
+    company: str | None,
+) -> int:
+    """Higher = better candidate among multiple publisher matches.
+
+    Same publisher and date can return multiple unrelated articles
+    (e.g., 연합인포맥스 2026-01-15 has both a 효성중공업 and a 카카오 article).
+    Without disambiguation, the matcher would pick whichever comes first
+    in the pool — possibly the wrong one. Score by:
+      • date overlap with the citation's date hint
+      • debate company name appearing in the item's title
+    """
+    score = 0
+    raw_item = item["raw"]
+    if citation.date_hint and _date_compatible(citation.date_hint, raw_item.get("published_at") or ""):
+        score += 10
+    if company:
+        company_norm = _norm(company)
+        item_title = _norm(raw_item.get("title") or "")
+        item_snippet = _norm(raw_item.get("snippet") or "")
+        if company_norm and company_norm in item_title:
+            score += 25
+        elif company_norm and company_norm in item_snippet:
+            score += 5
+    return score
+
+
+def _pick_best(
+    candidates: list[dict[str, Any]],
+    citation: Citation,
+    company: str | None,
+) -> dict[str, Any]:
+    """Pick the highest-scoring candidate; fall back to the first one."""
+    if not candidates:
+        raise ValueError("no candidates")
+    if len(candidates) == 1:
+        return candidates[0]
+    return max(candidates, key=lambda it: _score_candidate(citation, it, company))
+
+
 def verify_citations(
     citations: list[Citation],
     item_pool: list[dict[str, Any]],
+    *,
+    company: str | None = None,
 ) -> list[VerifiedCitation]:
     """Match every citation against the agent's item pool.
 
     item_pool is the concatenated list of items from each
-    `collect_existing_arguments` call this side made.
+    `collect_existing_arguments` call this side made. ``company`` (the
+    debate subject) disambiguates between multiple pool items that share
+    the same publisher and date — without it, two articles from the same
+    outlet on the same day are matched arbitrarily.
     """
     norm_items = []
     for it in item_pool:
@@ -164,44 +231,57 @@ def verify_citations(
         c_label = _norm(c.source_label)
         c_url = _norm(c.url or "")
 
-        # Tier 1: URL exact-or-substring
+        # Tier 1: URL exact-or-substring — collect all matches, pick best
         if c_url:
-            for it in norm_items:
-                if it["url"] and (c_url == it["url"] or c_url in it["url"] or it["url"] in c_url):
-                    status = "verified"
-                    match = it
-                    notes.append("URL 일치")
-                    break
+            url_matches = [
+                it
+                for it in norm_items
+                if it["url"]
+                and (c_url == it["url"] or c_url in it["url"] or it["url"] in c_url)
+            ]
+            if url_matches:
+                match = _pick_best(url_matches, c, company)
+                status = "verified"
+                notes.append(
+                    "URL 일치"
+                    + (f" (후보 {len(url_matches)}개 중 회사·날짜 점수 최고)" if len(url_matches) > 1 else "")
+                )
 
-        # Tier 2: source_name overlap
+        # Tier 2: source_name overlap — collect all, pick best
         if status == "suspect" and c_label:
-            for it in norm_items:
-                if it["source_name"] and (
-                    c_label in it["source_name"] or it["source_name"] in c_label
-                ):
-                    status = "verified"
-                    match = it
-                    notes.append("source_name 일치")
-                    break
+            sn_matches = [
+                it
+                for it in norm_items
+                if it["source_name"]
+                and (c_label in it["source_name"] or it["source_name"] in c_label)
+            ]
+            if sn_matches:
+                match = _pick_best(sn_matches, c, company)
+                status = "verified"
+                notes.append(
+                    "source_name 일치"
+                    + (f" (후보 {len(sn_matches)}개 중 회사·날짜 점수 최고)" if len(sn_matches) > 1 else "")
+                )
 
         # Tier 3: label appears in some item's snippet/title.
         # Also try the leading entity-name token of the label, to catch cases
         # like "키움증권 4/22 리포트" where only "키움증권" appears in the snippet.
-        candidates: list[str] = []
-        if c_label and len(c_label) >= 2:
-            candidates.append(c_label)
-            head = re.match(r"^[\w가-힣&\.\-]+", c_label)
-            if head and head.group(0) and head.group(0) != c_label and len(head.group(0)) >= 2:
-                candidates.append(head.group(0))
-        if status == "suspect" and candidates:
-            for cand in candidates:
-                for it in norm_items:
-                    if cand in it["snippet"] or cand in it["title"]:
-                        status = "partial"
-                        match = it
-                        notes.append(f"snippet에서 '{cand}' 발견")
-                        break
-                if status != "suspect":
+        if status == "suspect":
+            tier3_candidates: list[str] = []
+            if c_label and len(c_label) >= 2:
+                tier3_candidates.append(c_label)
+                head = re.match(r"^[\w가-힣&\.\-]+", c_label)
+                if head and head.group(0) and head.group(0) != c_label and len(head.group(0)) >= 2:
+                    tier3_candidates.append(head.group(0))
+            for cand in tier3_candidates:
+                hits = [
+                    it for it in norm_items
+                    if cand in it["snippet"] or cand in it["title"]
+                ]
+                if hits:
+                    match = _pick_best(hits, c, company)
+                    status = "partial"
+                    notes.append(f"snippet에서 '{cand}' 발견")
                     break
 
         out.append(
