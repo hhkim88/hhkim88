@@ -15,10 +15,11 @@ the agent always has *something* to quote.
 from __future__ import annotations
 
 import os
+import re
 import time
 from datetime import datetime
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 import feedparser
 import requests
@@ -49,6 +50,38 @@ def _strip_html(s: str) -> str:
         .replace("&lt;", "<")
         .replace("&gt;", ">")
     )
+
+
+_TITLE_PUBLISHER_RE = re.compile(r"\s[-–—]\s+([^-–—\n]{2,40})\s*$")
+
+
+def _publisher_from_title(title: str) -> str:
+    """Both Google News RSS and many Naver-API titles end with ' - 한경매거진&북'
+    style publisher attribution. Pull out that trailing chunk so the
+    citation-verifier can match on a real publisher name instead of the
+    generic 'news' fallback."""
+    if not title:
+        return ""
+    m = _TITLE_PUBLISHER_RE.search(title)
+    return m.group(1).strip() if m else ""
+
+
+def _publisher_from_url(url: str) -> str:
+    """Best-effort domain-based publisher hint, e.g. 'hankyung.com' -> 'hankyung'."""
+    if not url:
+        return ""
+    try:
+        host = urlparse(url).hostname or ""
+    except ValueError:
+        return ""
+    host = host.lower().lstrip("www.")
+    if not host:
+        return ""
+    # Drop the TLD; the second-to-last label is usually the brand
+    parts = host.split(".")
+    if len(parts) >= 2:
+        return parts[-2]
+    return host
 
 
 def _via_naver_api(query: str, limit: int) -> list[dict[str, Any]]:
@@ -190,6 +223,7 @@ def search_news_kr(
             body = it.get("snippet", "")
         if not pub:
             pub = _parse_pub_date(it.get("pub_date"))
+        publisher = _publisher_from_title(it["title"]) or _publisher_from_url(it["url"])
         doc = CompanyDoc(
             company=company,
             ticker=None,
@@ -199,7 +233,7 @@ def search_news_kr(
             title=it["title"],
             body_md=body[:8000],
             published_at=pub,
-            metadata={"stance_filter": stance},
+            metadata={"stance_filter": stance, "publisher": publisher},
         )
         out.append(doc.to_dict())
     return out

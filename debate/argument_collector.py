@@ -39,7 +39,8 @@ def _make_item(
 ) -> dict[str, Any]:
     metadata = doc.get("metadata") or {}
     source_name = (
-        metadata.get("feed_source")
+        metadata.get("publisher")  # extracted from news title/url
+        or metadata.get("feed_source")
         or metadata.get("channel")
         or metadata.get("subreddit")
         or metadata.get("platform")

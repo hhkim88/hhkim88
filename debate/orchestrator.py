@@ -228,6 +228,21 @@ _MCP_NAME = "debate"
 _MCP_SERVER = create_sdk_mcp_server(_MCP_NAME, tools=_TOOLS)
 _ALLOWED_TOOLS = [f"mcp__{_MCP_NAME}__{t.name}" for t in _TOOLS]
 
+# Tools whose returned items should populate the verification pool. Includes
+# collect_existing_arguments (the curated bundle) AND every individual source
+# tool the agent might call later for fact-checking. Without this set, a bull
+# rebuttal that runs search_company_news(stance="bear") and quotes the result
+# would be flagged as ❌ suspect even though the citation is real.
+_POOL_TOOL_NAMES = {
+    f"mcp__{_MCP_NAME}__collect_existing_arguments",
+    f"mcp__{_MCP_NAME}__search_company_news",
+    f"mcp__{_MCP_NAME}__get_secondary_reports",
+    f"mcp__{_MCP_NAME}__get_public_reports",
+    f"mcp__{_MCP_NAME}__get_youtube_analysis",
+    f"mcp__{_MCP_NAME}__get_social_buzz",
+    f"mcp__{_MCP_NAME}__get_ir_materials",
+}
+
 
 # --- agent runtime ------------------------------------------------------------
 
@@ -273,7 +288,6 @@ async def _agent_run(
     tool_log: list[dict[str, Any]] = []
     by_use_id: dict[str, dict[str, Any]] = {}
     collect_items: list[dict[str, Any]] = []
-    collect_tool_full = f"mcp__{_MCP_NAME}__collect_existing_arguments"
 
     async for msg in query(prompt=user_msg, options=options):
         if isinstance(msg, SystemMessage):
@@ -300,11 +314,12 @@ async def _agent_run(
                         entry = by_use_id.get(block.tool_use_id)
                         if entry is not None:
                             entry["ok"] = not _result_block_is_failure(block)
-                            # Always try to recover items from the collect tool —
-                            # even if the call's status flapped to failure for some
-                            # other reason, the items array (if present) is useful.
-                            if entry["name"] == collect_tool_full:
-                                items = _parse_collect_items(block.content)
+                            # Recover items from any tool that contributes to
+                            # the verification pool (collect + every source
+                            # search/fetch tool). Even if status flapped to
+                            # failure, populated items are still useful.
+                            if entry["name"] in _POOL_TOOL_NAMES:
+                                items = _parse_pool_items(entry["name"], block.content)
                                 if items:
                                     collect_items.extend(items)
                                     entry["ok"] = True
@@ -320,8 +335,18 @@ async def _agent_run(
     return final_text, new_session, tool_log, collect_items
 
 
-def _parse_collect_items(content: Any) -> list[dict[str, Any]]:
-    """Extract the `items` array from a collect_existing_arguments tool result."""
+def _parse_pool_items(tool_name: str, content: Any) -> list[dict[str, Any]]:
+    """Extract pool items from any pool-contributing tool result.
+
+    Two payload shapes:
+    - collect_existing_arguments wraps a list as ``{"items": [...]}``
+    - every other source tool (search_company_news, get_secondary_reports,
+      get_public_reports, get_youtube_analysis, get_social_buzz,
+      get_ir_materials) returns a flat ``list[CompanyDoc.to_dict()]``.
+
+    Both shapes get normalised into the same dict layout that
+    argument_collector emits, so verification matches them uniformly.
+    """
     if isinstance(content, list):
         text = " ".join(
             str(item.get("text", "")) for item in content if isinstance(item, dict)
@@ -334,10 +359,49 @@ def _parse_collect_items(content: Any) -> list[dict[str, Any]]:
         data = json.loads(text)
     except (json.JSONDecodeError, ValueError):
         return []
-    if isinstance(data, dict):
-        items = data.get("items", [])
-        return items if isinstance(items, list) else []
-    return []
+
+    if tool_name.endswith("__collect_existing_arguments"):
+        if isinstance(data, dict):
+            items = data.get("items", [])
+            return items if isinstance(items, list) else []
+        return []
+
+    # Source-tool format: list of CompanyDoc dicts
+    if not isinstance(data, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for doc in data:
+        if not isinstance(doc, dict):
+            continue
+        if "error" in doc and len(doc) <= 2:
+            continue
+        metadata = doc.get("metadata") or {}
+        source_name = (
+            metadata.get("publisher")
+            or metadata.get("feed_source")
+            or metadata.get("channel")
+            or metadata.get("subreddit")
+            or metadata.get("platform")
+            or metadata.get("broker")
+            or doc.get("source")
+            or ""
+        )
+        body = (doc.get("body_md") or "").strip()
+        out.append(
+            {
+                "source_type": doc.get("source") or "external",
+                "source_name": str(source_name),
+                "title": (doc.get("title") or "").strip(),
+                "snippet": body[:600] + ("..." if len(body) > 600 else ""),
+                "url": doc.get("url") or "",
+                "published_at": doc.get("published_at"),
+            }
+        )
+    return out
+
+
+# Back-compat alias — argument_collector still imports this name in tests
+_parse_collect_items = _parse_pool_items
 
 
 async def _run_debate_async(
