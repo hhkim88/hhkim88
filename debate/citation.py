@@ -92,6 +92,15 @@ _INTERNAL_TOOL_MARKERS = (
     "네이버 npay",
     "데이터 검증",
     "ohlcv",
+    # DART pulls flow through our get_financials tool, so any citation
+    # explicitly tagged with DART is an internal-tool self-reference, not
+    # an external item from the collect pool.
+    "dart 재무",
+    "dart 전자공시",
+    "dart 사업보고",
+    "재무데이터",
+    "전자공시",
+    "사업연도 영업이익",
 )
 
 
