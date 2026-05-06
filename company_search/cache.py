@@ -54,6 +54,23 @@ def set(key: str, value: Any, db_path: Path = DEFAULT_DB_PATH) -> None:
         )
 
 
+def _is_failure_payload(result: Any) -> bool:
+    """Don't cache responses that look like a failure — otherwise a transient
+    error gets stuck in SQLite for hours and the user keeps seeing it.
+    Empty results are also treated as failure so a misbehaving scraper retries
+    on the next call rather than silently returning [] for a day."""
+    if isinstance(result, list):
+        if not result:
+            return True
+        return all(
+            isinstance(d, dict) and "error" in d and len(d) <= 2 for d in result
+        )
+    if isinstance(result, dict):
+        if "error" in result and len(result) <= 2:
+            return True
+    return False
+
+
 def cached(key: str, ttl: int = DEFAULT_TTL_SECONDS):
     """Decorator: cache the JSON-serializable return of a zero-or-more-arg function."""
 
@@ -64,7 +81,8 @@ def cached(key: str, ttl: int = DEFAULT_TTL_SECONDS):
             if hit is not None:
                 return hit
             result = fn(*args, **kwargs)
-            set(full_key, result)
+            if not _is_failure_payload(result):
+                set(full_key, result)
             return result
 
         return wrapper
