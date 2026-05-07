@@ -124,6 +124,28 @@ _INTERNAL_TOOL_MARKERS = (
     "자체 계산",
     "자체 검증",
     "자체 합성",
+    # Korean natural-language descriptions of the get_analyst_consensus output.
+    # Without these the Bear's "애널리스트 컨센서스 데이터, 2026-05-07 기준"
+    # falls through to ❌ suspect even though it's a self-reference to the
+    # consensus tool, not a hallucinated external source.
+    "애널리스트 컨센서스",
+    "컨센서스 데이터",
+    "컨센서스 집계",
+    # Financial-statement self-references. The agent often cites
+    # "AAPL Income Statement" or "AAPL Cash Flow Statement, FY2025 기준" —
+    # those numbers come from get_financials (yfinance under the hood), not
+    # an external pool item. Without these markers the 4-char "AAPL" head
+    # falls through to tier-3 partial matching and pairs with random Apple
+    # news articles whose snippets happen to contain "Apple".
+    "income statement",
+    "balance sheet",
+    "cash flow statement",
+    "financial statements",
+    "yahoo finance financial",
+    "재무제표",
+    "현금흐름표",
+    "손익계산서",
+    "재무상태표",
 )
 
 
@@ -281,14 +303,19 @@ def verify_citations(
                     notes.append(f"snippet에서 '{cand}' 발견")
                     break
 
-        # Demote unmatched citations to ⚙️ internal when they reference one of
-        # our own data tools (price history, DART pulls, "자체 분석" tags). A
-        # hybrid citation like "유진투자증권, DS투자증권 리포트 종합, 자체 계산"
-        # would have already matched the external pool above, so this only fires
-        # for purely-internal references that have no external counterpart.
-        if status == "suspect" and _is_internal_tool_reference(c.raw, c.url):
+        # Demote citations to ⚙️ internal when they reference one of our own
+        # data tools (price history, DART pulls, "자체 분석" tags). A hybrid
+        # citation like "유진투자증권, DS투자증권 리포트 종합, 자체 계산" matches
+        # via tier 2 (source_name) and stays ✅ verified above, so this only
+        # affects suspect/partial outcomes. Override partial too because tier-3
+        # partial matches on short heads like "AAPL" pair with unrelated Apple
+        # news articles whose snippets happen to contain "Apple" — internal is
+        # the more accurate label when the citation explicitly names a
+        # financial-statement or consensus-data self-reference.
+        if status in ("suspect", "partial") and _is_internal_tool_reference(c.raw, c.url):
             status = "internal"
-            notes.append("내부 도구 결과를 출처로 인용 (외부 풀과 무관)")
+            match = None
+            notes = ["내부 도구 결과를 출처로 인용 (외부 풀과 무관)"]
 
         out.append(
             VerifiedCitation(
