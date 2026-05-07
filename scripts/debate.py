@@ -53,6 +53,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     md = to_markdown(args.company, args.market, transcript)
     if args.output:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(md, encoding="utf-8")
         print(f"Wrote debate transcript to {args.output}")
     else:
