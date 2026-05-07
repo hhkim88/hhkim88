@@ -108,12 +108,22 @@ _INTERNAL_TOOL_MARKERS = (
     # from get_price_history; they're a self-reference, not a hallucinated
     # external claim.
     "주가 데이터",
+    "가격 히스토리",
+    "가격 데이터",
     "180일 실적",
     "365일 실적",
     "180일 데이터",
     "365일 데이터",
     "180일 ohlcv",
     "365일 ohlcv",
+    # Analyst self-reference: when the agent attributes a calculation or
+    # synthesis to its own work (rather than an external source), it's not
+    # a hallucination — there's just nothing in the external pool to match.
+    "자체 분석",
+    "자체 데이터 분석",
+    "자체 계산",
+    "자체 검증",
+    "자체 합성",
 )
 
 
@@ -212,19 +222,6 @@ def verify_citations(
 
     out: list[VerifiedCitation] = []
     for c in citations:
-        # Pre-check: is the citation pointing at one of our internal data
-        # tools? If so, don't run the external-pool match — it would always
-        # come back as suspect and be confused with hallucination.
-        if _is_internal_tool_reference(c.raw, c.url):
-            out.append(
-                VerifiedCitation(
-                    citation=c,
-                    status="internal",
-                    notes=["내부 도구 결과를 출처로 인용 (외부 풀과 무관)"],
-                )
-            )
-            continue
-
         status = "suspect"
         match = None
         notes: list[str] = []
@@ -283,6 +280,15 @@ def verify_citations(
                     status = "partial"
                     notes.append(f"snippet에서 '{cand}' 발견")
                     break
+
+        # Demote unmatched citations to ⚙️ internal when they reference one of
+        # our own data tools (price history, DART pulls, "자체 분석" tags). A
+        # hybrid citation like "유진투자증권, DS투자증권 리포트 종합, 자체 계산"
+        # would have already matched the external pool above, so this only fires
+        # for purely-internal references that have no external counterpart.
+        if status == "suspect" and _is_internal_tool_reference(c.raw, c.url):
+            status = "internal"
+            notes.append("내부 도구 결과를 출처로 인용 (외부 풀과 무관)")
 
         out.append(
             VerifiedCitation(
