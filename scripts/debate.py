@@ -12,6 +12,12 @@ import os
 import sys
 from pathlib import Path
 
+# Python prepends this script's directory to sys.path, so `import debate`
+# would resolve to scripts/debate.py (this file) instead of the debate/
+# package at the project root, raising "'debate' is not a package". Put the
+# project root ahead of scripts/ so the package wins.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 # On Windows, default subprocess pipe decoding is the system code page (cp949
 # in Korean locales), which corrupts UTF-8 output from child processes such as
 # yt-dlp. Force UTF-8 mode for all child Python processes.
