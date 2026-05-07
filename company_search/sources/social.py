@@ -1,24 +1,23 @@
-"""Social buzz: Reddit (PRAW or Google News fallback) for US, Naver Finance
+"""Social buzz: Reddit (PRAW or public-JSON fallback) for US, Naver Finance
 discussion board for KR.
 
-Reddit's PRAW path needs REDDIT_CLIENT_ID/SECRET. Issuing those keys requires
-a verified email + sometimes phone, and several users have reported that the
-"create app" button errors out indefinitely (regional restrictions, captcha
-loops, account-age thresholds). When the credentials are absent OR PRAW
-itself fails, fall back to Google News RSS with `site:reddit.com/r/<sub>`
-filters — we lose comment counts and full post bodies but keep the headlines
-and URLs flowing into the verification pool.
+Reddit's PRAW path needs REDDIT_CLIENT_ID/SECRET, and the "create app" form
+errors out for many users (regional restrictions, captcha loops, new-account
+karma gates). When credentials are absent or PRAW fails, fall back to Reddit's
+public JSON search endpoints — same quality as PRAW (full body, score, comment
+count), no auth required, just needs a custom User-Agent. The earlier Google
+News fallback was abandoned because Google News is a curated news aggregator
+and almost never indexes reddit.com threads, so the fallback returned 0 items.
 """
 
 from __future__ import annotations
 
 import os
-import time
 from datetime import datetime
 from typing import Any
-from urllib.parse import quote, urljoin
+from urllib.parse import urljoin
 
-import feedparser
+import requests
 from bs4 import BeautifulSoup
 
 from .. import cache
@@ -28,79 +27,71 @@ from ..schema import CompanyDoc
 REDDIT_SUBS = ["stocks", "investing", "wallstreetbets", "SecurityAnalysis"]
 
 
-def _reddit_via_google_news(company: str, limit: int) -> list[dict[str, Any]]:
-    """Reddit posts surfaced through Google News (no API key needed).
+def _reddit_via_public_json(company: str, limit: int) -> list[dict[str, Any]]:
+    """Reddit search via reddit.com/r/<sub>/search.json (no auth required).
 
-    Google indexes Reddit thread pages as web results; querying with
-    `site:reddit.com/r/<sub>` gives us recent threads matching the company
-    name. Body text is the Google News-extracted snippet (typically the
-    OP's first paragraph), which is enough for the debate agent to spot
-    bullish/bearish sentiment patterns.
+    The unauthenticated JSON endpoint enforces a polite User-Agent; the default
+    python-requests UA is rate-limited aggressively. With a real UA the limits
+    are roughly 10 req/min per IP, which the 4-hour cache TTL absorbs easily.
     """
-    sub_filter = " OR ".join(f"site:reddit.com/r/{s}" for s in REDDIT_SUBS)
-    q = f'"{company}" ({sub_filter})'
-    feed_url = (
-        "https://news.google.com/rss/search"
-        f"?q={quote(q)}&hl=en-US&gl=US&ceid=US:en"
-    )
-    feed = feedparser.parse(feed_url)
+    ua = os.environ.get("REDDIT_USER_AGENT", "company-search/0.1 (debate)")
+    headers = {"User-Agent": ua}
     docs: list[dict[str, Any]] = []
-    for entry in feed.entries[: limit * 2]:
-        # Google News wraps entry.link in a news.google.com/rss/articles/CBMi...
-        # redirect URL — the underlying reddit.com URL is base64-encoded
-        # inside it, so a literal `"reddit.com" in url` check fails. Use
-        # entry.source.href instead, which Google News populates with the
-        # publisher's actual domain (e.g., https://www.reddit.com).
-        url = entry.get("link", "")
-        title = entry.get("title", "")
-        if not url or not title:
+    per_sub = max(2, limit // len(REDDIT_SUBS) + 1)
+    for sub in REDDIT_SUBS:
+        url = f"https://www.reddit.com/r/{sub}/search.json"
+        params = {"q": company, "restrict_sr": "1", "sort": "new", "limit": per_sub}
+        try:
+            r = requests.get(url, headers=headers, params=params, timeout=15)
+            r.raise_for_status()
+            data = r.json()
+        except Exception:
+            # Silently skip a single subreddit failure — we still want partial
+            # coverage from the others rather than aborting the whole pool.
             continue
-        source_href = (entry.get("source", {}) or {}).get("href") or ""
-        if "reddit.com" not in url and "reddit.com" not in source_href:
-            continue
-        time.sleep(0.2)
-        published = None
-        if entry.get("published_parsed"):
-            published = datetime(*entry.published_parsed[:6])
-        # Subreddit extraction: try the (unreliable) link first, then look
-        # for "r/<sub>" patterns in the title or source href.
-        subreddit = ""
-        haystack = f"{url} {source_href} {title}".lower()
-        for s in REDDIT_SUBS:
-            if f"/r/{s}/" in haystack or f"r/{s.lower()}" in haystack:
-                subreddit = s
-                break
-        snippet = entry.get("summary", "") or ""
-        doc = CompanyDoc(
-            company=company,
-            ticker=None,
-            market="US",
-            source="social",
-            url=url,
-            title=title,
-            body_md=snippet[:4000],
-            published_at=published,
-            metadata={
-                "platform": "reddit_via_google_news",
-                "subreddit": subreddit,
-                "publisher": f"r/{subreddit}" if subreddit else "Reddit",
-            },
-        )
-        docs.append(doc.to_dict())
-        if len(docs) >= limit:
-            break
+        for child in data.get("data", {}).get("children", []):
+            post = child.get("data", {}) or {}
+            title = (post.get("title") or "").strip()
+            if not title:
+                continue
+            permalink = post.get("permalink") or ""
+            full_url = f"https://reddit.com{permalink}" if permalink else (post.get("url") or "")
+            created = post.get("created_utc")
+            published = (
+                datetime.utcfromtimestamp(created) if isinstance(created, (int, float)) else None
+            )
+            doc = CompanyDoc(
+                company=company,
+                ticker=None,
+                market="US",
+                source="social",
+                url=full_url,
+                title=title,
+                body_md=(post.get("selftext") or "")[:4000],
+                published_at=published,
+                metadata={
+                    "platform": "reddit_public_json",
+                    "subreddit": sub,
+                    "publisher": f"r/{sub}",
+                    "score": post.get("score", 0),
+                    "num_comments": post.get("num_comments", 0),
+                },
+            )
+            docs.append(doc.to_dict())
+            if len(docs) >= limit:
+                return docs
     return docs
 
 
-@cache.cached("social:reddit:v3", ttl=4 * 3600)
+@cache.cached("social:reddit:v4", ttl=4 * 3600)
 def search_reddit(company: str, limit: int = 10) -> list[dict[str, Any]]:
     cid = os.environ.get("REDDIT_CLIENT_ID")
     csec = os.environ.get("REDDIT_CLIENT_SECRET")
     ua = os.environ.get("REDDIT_USER_AGENT", "company-search/0.1")
     if not (cid and csec):
-        # No keys → use the Google News fallback so the social pool isn't
+        # No keys → use the public JSON fallback so the social pool isn't
         # silently empty for users who can't get a Reddit script app issued.
-        return _reddit_via_google_news(company, limit=limit)
+        return _reddit_via_public_json(company, limit=limit)
     try:
         import praw
 
@@ -133,12 +124,12 @@ def search_reddit(company: str, limit: int = 10) -> list[dict[str, Any]]:
         if results:
             return results
         # PRAW returned nothing (rare — usually means the search rate-limited).
-        # Fall through to the Google News fallback.
-        return _reddit_via_google_news(company, limit=limit)
+        # Fall through to the public-JSON path.
+        return _reddit_via_public_json(company, limit=limit)
     except Exception:
         # Any PRAW-level failure (auth revoked, rate limit, network) — fall
         # back rather than poisoning the pool with an error doc.
-        return _reddit_via_google_news(company, limit=limit)
+        return _reddit_via_public_json(company, limit=limit)
 
 
 def _via_naver_mobile_board(ticker: str, limit: int) -> list[dict[str, Any]]:

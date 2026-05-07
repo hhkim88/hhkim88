@@ -119,7 +119,7 @@ Claude Code 재시작 후 자연어로:
 | 경로 | 활성 조건 | 풍부도 | 비고 |
 |---|---|---|---|
 | **PRAW (Reddit 공식 API)** | `.env`에 `REDDIT_CLIENT_ID/SECRET` 설정됨 | 풍부 — 본문 전체, 업보트 수, 댓글 수 | 키 발급 필요 (아래 단계) |
-| **Google News fallback** | 키 없거나 PRAW 실패 시 자동 fallback | 헤드라인 + 첫 단락 스니펫 (업보트·댓글 없음) | 별도 셋업 불필요 |
+| **Public JSON fallback** | 키 없거나 PRAW 실패 시 자동 fallback | 풍부 — PRAW와 동일 (본문/업보트/댓글) | `reddit.com/r/<sub>/search.json` 직접 호출, 셋업 불필요 |
 
 ### (선택) Reddit API 키 발급으로 풍부도 ↑
 
@@ -148,8 +148,9 @@ Claude Code 재시작 후 자연어로:
 
 **주의**: 4단계에서 *"create app" 버튼이 에러*가 나는 경우가 종종 있습니다.
 원인은 보통 ① 이메일 미인증, ② 신규 계정 karma 0, ③ 지역·캡차 차단입니다.
-이 셋 다 해결이 어려우면 그냥 fallback에 의존해도 토론 품질에 큰 차이는 없습니다
-(헤드라인·URL은 다 잡히므로 인용 검증은 동일하게 동작).
+키 발급에 실패해도 자동 fallback이 reddit.com 공식 JSON 엔드포인트로 라우팅되며,
+PRAW와 거의 동일한 데이터(본문·업보트 수·댓글 수)를 반환하므로 토론 품질에
+실질적 차이가 없습니다.
 
 ## 한계 (정직한 평가)
 
