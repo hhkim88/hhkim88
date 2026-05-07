@@ -152,23 +152,33 @@ def _via_naver_research(company: str, limit: int) -> list[dict[str, Any]]:
                 pdf_url = NAVER_FIN_BASE + href
 
         # Best-effort column extraction (broker / date)
+        # Naver finance research listing columns are typically:
+        #   종목명(0) | 제목(1) | 증권사(2) | 첨부(3) | 작성일(4) | 조회수(5)
         broker = ""
         date = ""
         cell_texts = [c.get_text(strip=True) for c in cells]
-        # Skip first cell if it is the company name (which is just the search filter).
-        text_pool = [t for t in cell_texts if t and t != title]
+        # Skip the title and the company-name filter cell to avoid picking
+        # the company itself as the brokerage.
+        text_pool = [t for t in cell_texts if t and t != title and t != company]
         # Date pattern (YY.MM.DD or YYYY.MM.DD)
         for t in text_pool:
             if re.match(r"^\d{2,4}[.\-/]\d{1,2}[.\-/]\d{1,2}$", t):
                 date = t
                 break
-        # Brokerage is typically the cell with no digits and Korean chars
-        for t in text_pool:
-            if t == date or t == title:
-                continue
-            if re.search(r"[가-힣]", t) and not re.search(r"\d{4,}", t):
-                broker = t
-                break
+        # Prefer the canonical broker column when the table has enough cells.
+        if len(cells) >= 4:
+            cand = cells[2].get_text(strip=True)
+            if cand and cand != title and cand != company and re.search(r"[가-힣]", cand):
+                broker = cand
+        # Fallback heuristic: cell with Korean chars, no long digit run, and
+        # not the company name or title.
+        if not broker:
+            for t in text_pool:
+                if t == date:
+                    continue
+                if re.search(r"[가-힣]", t) and not re.search(r"\d{4,}", t):
+                    broker = t
+                    break
 
         body = _extract_pdf(pdf_url, referer=listing_url) if pdf_url else ""
         docs.append(
@@ -322,7 +332,7 @@ def _via_naver_site_filter(company: str, limit: int) -> list[dict[str, Any]]:
 # ---------------------------------------------------------------------------
 
 
-@cache.cached("reports:kr:v3", ttl=12 * 3600)
+@cache.cached("reports:kr:v4", ttl=12 * 3600)
 def search_reports(company: str, limit: int = 5) -> list[dict[str, Any]]:
     """Aggregate analyst reports for a Korean company across Naver Finance
     Research and Hankyung Consensus. Results are deduped by URL and capped

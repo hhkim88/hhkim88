@@ -122,7 +122,7 @@ def get_shares_outstanding(company_name: str, year: int) -> dict[str, Any]:
     }
 
 
-@cache.cached("dart:financials:v2", ttl=24 * 3600)
+@cache.cached("dart:financials:v3", ttl=24 * 3600)
 def get_annual_financials(company_name: str, year: int) -> dict[str, Any]:
     """Single-year consolidated annual financials (사업보고서) plus shares
     outstanding so the caller can compute PER / PBR / market-cap directly."""
@@ -152,14 +152,37 @@ def get_annual_financials(company_name: str, year: int) -> dict[str, Any]:
         "부채총계": "total_liabilities",
         "자본총계": "total_equity",
     }
+    # DART repeats the same account_nm across statement types (BS/IS/CIS/CF/SCE),
+    # often with very different signs and magnitudes. Without filtering we'd
+    # overwrite balance-sheet totals with statement-of-changes-in-equity rows
+    # (which can be negative for net movement). Pin each field to its expected
+    # statement type and prefer the first non-zero match.
+    expected_sj_div = {
+        "revenue": "IS",
+        "operating_income": "IS",
+        "net_income": "IS",
+        "total_assets": "BS",
+        "total_liabilities": "BS",
+        "total_equity": "BS",
+    }
     for row in rows:
         nm = row.get("account_nm", "")
-        if nm in keep_keys:
-            try:
-                amt = int((row.get("thstrm_amount") or "0").replace(",", ""))
-            except ValueError:
-                continue
-            summary[keep_keys[nm]] = amt
+        if nm not in keep_keys:
+            continue
+        target = keep_keys[nm]
+        sj_div = (row.get("sj_div") or "").strip()
+        # If DART supplies sj_div, require the canonical statement type.
+        if sj_div and sj_div != expected_sj_div[target]:
+            continue
+        try:
+            amt = int((row.get("thstrm_amount") or "0").replace(",", ""))
+        except ValueError:
+            continue
+        # Prefer the first non-zero hit; don't let later rows overwrite a good
+        # value with 0 or a different statement's number.
+        if summary.get(target):
+            continue
+        summary[target] = amt
 
     # Best-effort: pull shares outstanding from the dedicated DART endpoint.
     # Failure here must not break the financials call.
