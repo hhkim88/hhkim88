@@ -1,12 +1,24 @@
-"""Social buzz: Reddit (PRAW) for US, Naver Finance discussion board for KR."""
+"""Social buzz: Reddit (PRAW or Google News fallback) for US, Naver Finance
+discussion board for KR.
+
+Reddit's PRAW path needs REDDIT_CLIENT_ID/SECRET. Issuing those keys requires
+a verified email + sometimes phone, and several users have reported that the
+"create app" button errors out indefinitely (regional restrictions, captcha
+loops, account-age thresholds). When the credentials are absent OR PRAW
+itself fails, fall back to Google News RSS with `site:reddit.com/r/<sub>`
+filters — we lose comment counts and full post bodies but keep the headlines
+and URLs flowing into the verification pool.
+"""
 
 from __future__ import annotations
 
 import os
+import time
 from datetime import datetime
 from typing import Any
-from urllib.parse import urljoin
+from urllib.parse import quote, urljoin
 
+import feedparser
 from bs4 import BeautifulSoup
 
 from .. import cache
@@ -16,13 +28,69 @@ from ..schema import CompanyDoc
 REDDIT_SUBS = ["stocks", "investing", "wallstreetbets", "SecurityAnalysis"]
 
 
-@cache.cached("social:reddit", ttl=4 * 3600)
+def _reddit_via_google_news(company: str, limit: int) -> list[dict[str, Any]]:
+    """Reddit posts surfaced through Google News (no API key needed).
+
+    Google indexes Reddit thread pages as web results; querying with
+    `site:reddit.com/r/<sub>` gives us recent threads matching the company
+    name. Body text is the Google News-extracted snippet (typically the
+    OP's first paragraph), which is enough for the debate agent to spot
+    bullish/bearish sentiment patterns.
+    """
+    sub_filter = " OR ".join(f"site:reddit.com/r/{s}" for s in REDDIT_SUBS)
+    q = f'"{company}" ({sub_filter})'
+    feed_url = (
+        "https://news.google.com/rss/search"
+        f"?q={quote(q)}&hl=en-US&gl=US&ceid=US:en"
+    )
+    feed = feedparser.parse(feed_url)
+    docs: list[dict[str, Any]] = []
+    for entry in feed.entries[: limit * 2]:
+        url = entry.get("link", "")
+        title = entry.get("title", "")
+        if not url or not title or "reddit.com" not in url:
+            continue
+        time.sleep(0.2)
+        published = None
+        if entry.get("published_parsed"):
+            published = datetime(*entry.published_parsed[:6])
+        # Try to extract subreddit from URL: reddit.com/r/<sub>/comments/...
+        subreddit = ""
+        for s in REDDIT_SUBS:
+            if f"/r/{s}/" in url.lower():
+                subreddit = s
+                break
+        snippet = entry.get("summary", "") or ""
+        doc = CompanyDoc(
+            company=company,
+            ticker=None,
+            market="US",
+            source="social",
+            url=url,
+            title=title,
+            body_md=snippet[:4000],
+            published_at=published,
+            metadata={
+                "platform": "reddit_via_google_news",
+                "subreddit": subreddit,
+                "publisher": f"r/{subreddit}" if subreddit else "Reddit",
+            },
+        )
+        docs.append(doc.to_dict())
+        if len(docs) >= limit:
+            break
+    return docs
+
+
+@cache.cached("social:reddit:v2", ttl=4 * 3600)
 def search_reddit(company: str, limit: int = 10) -> list[dict[str, Any]]:
     cid = os.environ.get("REDDIT_CLIENT_ID")
     csec = os.environ.get("REDDIT_CLIENT_SECRET")
     ua = os.environ.get("REDDIT_USER_AGENT", "company-search/0.1")
     if not (cid and csec):
-        return [{"error": "REDDIT_CLIENT_ID / REDDIT_CLIENT_SECRET not set"}]
+        # No keys → use the Google News fallback so the social pool isn't
+        # silently empty for users who can't get a Reddit script app issued.
+        return _reddit_via_google_news(company, limit=limit)
     try:
         import praw
 
@@ -42,7 +110,9 @@ def search_reddit(company: str, limit: int = 10) -> list[dict[str, Any]]:
                     body_md=(post.selftext or "")[:4000],
                     published_at=datetime.utcfromtimestamp(post.created_utc),
                     metadata={
+                        "platform": "reddit_praw",
                         "subreddit": sub,
+                        "publisher": f"r/{sub}",
                         "score": post.score,
                         "num_comments": post.num_comments,
                     },
@@ -50,9 +120,15 @@ def search_reddit(company: str, limit: int = 10) -> list[dict[str, Any]]:
                 results.append(doc.to_dict())
                 if len(results) >= limit:
                     return results
-        return results
-    except Exception as e:
-        return [{"error": str(e)}]
+        if results:
+            return results
+        # PRAW returned nothing (rare — usually means the search rate-limited).
+        # Fall through to the Google News fallback.
+        return _reddit_via_google_news(company, limit=limit)
+    except Exception:
+        # Any PRAW-level failure (auth revoked, rate limit, network) — fall
+        # back rather than poisoning the pool with an error doc.
+        return _reddit_via_google_news(company, limit=limit)
 
 
 def _via_naver_mobile_board(ticker: str, limit: int) -> list[dict[str, Any]]:

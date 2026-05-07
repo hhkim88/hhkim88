@@ -112,11 +112,16 @@ Claude Code 재시작 후 자연어로:
 - "AAPL 컨센서스 어때?" → `get_analyst_consensus`
 - "TSLA 유튜브 분석" → `get_youtube_analysis`
 
-## Reddit API 키 발급 가이드 (US SNS용)
+## Reddit US SNS 데이터
 
-미국 종목 토론에서 SNS 풀(Reddit)을 비우지 않으려면 무료 API 키가 필요합니다.
-없이 실행하면 `get_social_buzz` / `collect_existing_arguments`의 `social` 항목이
-`{"error": "REDDIT_CLIENT_ID / REDDIT_CLIENT_SECRET not set"}`로 비어버립니다.
+키 없이도 동작합니다 — `get_social_buzz`는 두 가지 경로 중 하나를 자동 선택:
+
+| 경로 | 활성 조건 | 풍부도 | 비고 |
+|---|---|---|---|
+| **PRAW (Reddit 공식 API)** | `.env`에 `REDDIT_CLIENT_ID/SECRET` 설정됨 | 풍부 — 본문 전체, 업보트 수, 댓글 수 | 키 발급 필요 (아래 단계) |
+| **Google News fallback** | 키 없거나 PRAW 실패 시 자동 fallback | 헤드라인 + 첫 단락 스니펫 (업보트·댓글 없음) | 별도 셋업 불필요 |
+
+### (선택) Reddit API 키 발급으로 풍부도 ↑
 
 1. https://www.reddit.com/prefs/apps 접속 (Reddit 계정 필요, 무료 가입)
 2. 페이지 하단 **"create another app..."** 클릭
@@ -138,13 +143,13 @@ Claude Code 재시작 후 자연어로:
    ```bash
    uv run python -m company_search social AAPL --market US
    ```
-   r/stocks · r/investing · r/wallstreetbets · r/SecurityAnalysis 게시물이
-   섞여 나오면 성공.
+   `platform: reddit_praw`로 표시되면 PRAW 경로, `reddit_via_google_news`면
+   fallback 경로입니다.
 
-**주의**: Reddit script 앱은 사용자별 1분당 60 요청 제한이 있습니다. 캐시(4시간 TTL)
-덕에 동일 종목 재검색은 무료지만, 짧은 시간 내 여러 종목을 돌리면 일시적으로 막힐
-수 있습니다. 그 경우 몇 분 기다리거나 user agent 문자열에 본인 식별자를 넣어
-요청 우선순위를 높이세요.
+**주의**: 4단계에서 *"create app" 버튼이 에러*가 나는 경우가 종종 있습니다.
+원인은 보통 ① 이메일 미인증, ② 신규 계정 karma 0, ③ 지역·캡차 차단입니다.
+이 셋 다 해결이 어려우면 그냥 fallback에 의존해도 토론 품질에 큰 차이는 없습니다
+(헤드라인·URL은 다 잡히므로 인용 검증은 동일하게 동작).
 
 ## 한계 (정직한 평가)
 
