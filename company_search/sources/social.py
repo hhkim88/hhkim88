@@ -46,18 +46,28 @@ def _reddit_via_google_news(company: str, limit: int) -> list[dict[str, Any]]:
     feed = feedparser.parse(feed_url)
     docs: list[dict[str, Any]] = []
     for entry in feed.entries[: limit * 2]:
+        # Google News wraps entry.link in a news.google.com/rss/articles/CBMi...
+        # redirect URL — the underlying reddit.com URL is base64-encoded
+        # inside it, so a literal `"reddit.com" in url` check fails. Use
+        # entry.source.href instead, which Google News populates with the
+        # publisher's actual domain (e.g., https://www.reddit.com).
         url = entry.get("link", "")
         title = entry.get("title", "")
-        if not url or not title or "reddit.com" not in url:
+        if not url or not title:
+            continue
+        source_href = (entry.get("source", {}) or {}).get("href") or ""
+        if "reddit.com" not in url and "reddit.com" not in source_href:
             continue
         time.sleep(0.2)
         published = None
         if entry.get("published_parsed"):
             published = datetime(*entry.published_parsed[:6])
-        # Try to extract subreddit from URL: reddit.com/r/<sub>/comments/...
+        # Subreddit extraction: try the (unreliable) link first, then look
+        # for "r/<sub>" patterns in the title or source href.
         subreddit = ""
+        haystack = f"{url} {source_href} {title}".lower()
         for s in REDDIT_SUBS:
-            if f"/r/{s}/" in url.lower():
+            if f"/r/{s}/" in haystack or f"r/{s.lower()}" in haystack:
                 subreddit = s
                 break
         snippet = entry.get("summary", "") or ""
@@ -82,7 +92,7 @@ def _reddit_via_google_news(company: str, limit: int) -> list[dict[str, Any]]:
     return docs
 
 
-@cache.cached("social:reddit:v2", ttl=4 * 3600)
+@cache.cached("social:reddit:v3", ttl=4 * 3600)
 def search_reddit(company: str, limit: int = 10) -> list[dict[str, Any]]:
     cid = os.environ.get("REDDIT_CLIENT_ID")
     csec = os.environ.get("REDDIT_CLIENT_SECRET")
