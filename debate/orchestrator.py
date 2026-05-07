@@ -195,6 +195,24 @@ async def t_get_public_reports(args):
 
 
 @tool(
+    "get_earnings_calls",
+    "Free earnings call transcripts (US only — Motley Fool). Body is the actual CEO/CFO Q&A. KR returns explanatory error (no free Korean equivalent).",
+    {"company": str, "market": str, "limit": int},
+)
+async def t_get_earnings_calls(args):
+    return _wrap(tool_dispatch("get_earnings_calls", args))
+
+
+@tool(
+    "get_seeking_alpha",
+    "Seeking Alpha contributor commentary headlines + Google News snippets (US only). stance='bull'|'bear'|'neutral' biases the article filter.",
+    {"company": str, "stance": str, "limit": int},
+)
+async def t_get_seeking_alpha(args):
+    return _wrap(tool_dispatch("get_seeking_alpha", args))
+
+
+@tool(
     "collect_existing_arguments",
     "강세/약세 외부 주장을 한 번에 수집한다. stance에 맞춰 뉴스 키워드를 편향시키고 "
     "secondary 리포트 인용 기사 / 한경 컨센서스 PDF (KR) / 유튜브 분석 / 종토방·Reddit "
@@ -223,6 +241,8 @@ _TOOLS = [
     t_get_social_buzz,
     t_get_ir_materials,
     t_get_public_reports,
+    t_get_earnings_calls,
+    t_get_seeking_alpha,
 ]
 _MCP_NAME = "debate"
 _MCP_SERVER = create_sdk_mcp_server(_MCP_NAME, tools=_TOOLS)
@@ -241,6 +261,8 @@ _POOL_TOOL_NAMES = {
     f"mcp__{_MCP_NAME}__get_youtube_analysis",
     f"mcp__{_MCP_NAME}__get_social_buzz",
     f"mcp__{_MCP_NAME}__get_ir_materials",
+    f"mcp__{_MCP_NAME}__get_earnings_calls",
+    f"mcp__{_MCP_NAME}__get_seeking_alpha",
 }
 
 

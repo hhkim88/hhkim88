@@ -6,6 +6,7 @@ from typing import Any
 
 from company_search.sources import (
     consensus,
+    earnings_call,
     financials_kr,
     financials_us,
     ir,
@@ -14,6 +15,7 @@ from company_search.sources import (
     price,
     reports,
     secondary,
+    seekingalpha,
     social,
     youtube,
 )
@@ -135,6 +137,32 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
             "required": ["company"],
         },
     },
+    {
+        "name": "get_earnings_calls",
+        "description": "Free earnings call transcripts (US only — Motley Fool). Body text is the actual CEO/CFO Q&A. KR is unsupported (no free Korean equivalent).",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "company": {"type": "string"},
+                "market": {"type": "string", "enum": ["KR", "US"]},
+                "limit": {"type": "integer", "default": 5},
+            },
+            "required": ["company", "market"],
+        },
+    },
+    {
+        "name": "get_seeking_alpha",
+        "description": "Seeking Alpha contributor commentary headlines + Google News snippets (US only). stance='bull'|'bear'|'neutral' biases the article filter.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "company": {"type": "string"},
+                "stance": {"type": "string", "enum": ["bull", "bear", "neutral"]},
+                "limit": {"type": "integer", "default": 5},
+            },
+            "required": ["company"],
+        },
+    },
 ]
 
 
@@ -188,5 +216,15 @@ def dispatch(name: str, args: dict[str, Any]) -> Any:
 
     if name == "get_public_reports":
         return reports.search_reports(args["company"], limit=args.get("limit", 5))
+
+    if name == "get_earnings_calls":
+        return earnings_call.search_earnings_calls(
+            args["company"], market=args.get("market", "US"), limit=args.get("limit", 5)
+        )
+
+    if name == "get_seeking_alpha":
+        return seekingalpha.search_seeking_alpha(
+            args["company"], stance=args.get("stance", "neutral"), limit=args.get("limit", 5)
+        )
 
     return {"error": f"unknown tool: {name}"}

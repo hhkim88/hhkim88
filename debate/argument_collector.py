@@ -13,10 +13,12 @@ from __future__ import annotations
 from typing import Any
 
 from company_search.sources import (
+    earnings_call,
     news_kr,
     news_us,
     reports,
     secondary,
+    seekingalpha,
     social,
     youtube,
 )
@@ -139,6 +141,31 @@ def collect_existing_arguments(
             errors.append({"source": "social", "error": doc["error"]})
             continue
         items.append(_make_item("social", doc, fallback_source_name="social"))
+
+    # 6. US-only: free earnings-call transcripts (Motley Fool) and Seeking
+    # Alpha contributor headlines. Both are skipped on KR because no free
+    # equivalents exist; the corresponding tools return an explanatory error
+    # rather than fake items.
+    if market == "US":
+        ec_docs = _safe_call(
+            earnings_call.search_earnings_calls, company, market="US",
+            limit=per_source_limit,
+        )
+        for doc in ec_docs:
+            if _is_error_doc(doc):
+                errors.append({"source": "earnings_call", "error": doc["error"]})
+                continue
+            items.append(_make_item("earnings_call", doc, fallback_source_name="motley_fool"))
+
+        sa_docs = _safe_call(
+            seekingalpha.search_seeking_alpha, company, stance=stance,
+            limit=per_source_limit,
+        )
+        for doc in sa_docs:
+            if _is_error_doc(doc):
+                errors.append({"source": "seeking_alpha", "error": doc["error"]})
+                continue
+            items.append(_make_item("seeking_alpha", doc, fallback_source_name="seeking_alpha"))
 
     counts: dict[str, int] = {}
     for it in items:

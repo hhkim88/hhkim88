@@ -24,6 +24,7 @@ from mcp.server.fastmcp import FastMCP
 from . import sentiment
 from .sources import (
     consensus,
+    earnings_call,
     financials_kr,
     financials_us,
     ir,
@@ -32,6 +33,7 @@ from .sources import (
     price,
     reports,
     secondary,
+    seekingalpha,
     social,
     youtube,
 )
@@ -101,6 +103,22 @@ def get_ir_materials(company: str, market: str = "KR", limit: int = 5) -> str:
 def get_public_reports(company: str, limit: int = 5) -> str:
     """Hankyung Consensus public PDFs (KR only)."""
     return _json(reports.search_reports(company, limit=limit))
+
+
+@mcp.tool()
+def get_earnings_calls(company: str, market: str = "US", limit: int = 5) -> str:
+    """Free earnings call transcripts (US only — Motley Fool). KR returns
+    an explanatory error since no equivalent free transcript publisher
+    exists for Korean firms."""
+    return _json(earnings_call.search_earnings_calls(company, market=market, limit=limit))
+
+
+@mcp.tool()
+def get_seeking_alpha(company: str, stance: str = "neutral", limit: int = 5) -> str:
+    """Seeking Alpha contributor commentary (US only). Routed through
+    Google News with site:seekingalpha.com because direct fetches are
+    Cloudflare-blocked."""
+    return _json(seekingalpha.search_seeking_alpha(company, stance=stance, limit=limit))
 
 
 @mcp.tool()

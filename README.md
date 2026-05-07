@@ -23,6 +23,8 @@
 | 유튜브 트랜스크립트 | 슈카·삼프로TV·Damodaran 등 | `yt-dlp`, `youtube-transcript-api` |
 | SNS | Reddit, 네이버 종목토론방 | `praw`, `bs4` |
 | IR 자료 | DART, SEC EDGAR 8-K | `requests` |
+| Earnings call (US) | Motley Fool 무료 트랜스크립트 | `feedparser`, `newspaper4k` |
+| Seeking Alpha (US) | SA 컨트리뷰터 헤드라인 (Google News 경유) | `feedparser` |
 | 매크로 | 한국은행 ECOS, FRED, BLS | `requests` |
 
 ## 셋업
@@ -110,6 +112,40 @@ Claude Code 재시작 후 자연어로:
 - "AAPL 컨센서스 어때?" → `get_analyst_consensus`
 - "TSLA 유튜브 분석" → `get_youtube_analysis`
 
+## Reddit API 키 발급 가이드 (US SNS용)
+
+미국 종목 토론에서 SNS 풀(Reddit)을 비우지 않으려면 무료 API 키가 필요합니다.
+없이 실행하면 `get_social_buzz` / `collect_existing_arguments`의 `social` 항목이
+`{"error": "REDDIT_CLIENT_ID / REDDIT_CLIENT_SECRET not set"}`로 비어버립니다.
+
+1. https://www.reddit.com/prefs/apps 접속 (Reddit 계정 필요, 무료 가입)
+2. 페이지 하단 **"create another app..."** 클릭
+3. 양식 작성:
+   - **name**: `company-search` (자유)
+   - **type**: `script` 선택 (개인 사용 목적)
+   - **redirect uri**: `http://localhost:8080` (script 타입에선 실제로 사용 안 함)
+   - description / about url은 비워둬도 됨
+4. **create app** 클릭하면 다음 두 값이 발급됩니다:
+   - 앱 이름 바로 아래의 짧은 문자열 (보통 14~22자) → `REDDIT_CLIENT_ID`
+   - "secret" 라벨 옆 긴 문자열 → `REDDIT_CLIENT_SECRET`
+5. `.env`에 추가:
+   ```
+   REDDIT_CLIENT_ID=발급받은_client_id
+   REDDIT_CLIENT_SECRET=발급받은_secret
+   REDDIT_USER_AGENT=company-search/0.1 by yourname
+   ```
+6. 검증:
+   ```bash
+   uv run python -m company_search social AAPL --market US
+   ```
+   r/stocks · r/investing · r/wallstreetbets · r/SecurityAnalysis 게시물이
+   섞여 나오면 성공.
+
+**주의**: Reddit script 앱은 사용자별 1분당 60 요청 제한이 있습니다. 캐시(4시간 TTL)
+덕에 동일 종목 재검색은 무료지만, 짧은 시간 내 여러 종목을 돌리면 일시적으로 막힐
+수 있습니다. 그 경우 몇 분 기다리거나 user agent 문자열에 본인 식별자를 넣어
+요청 우선순위를 높이세요.
+
 ## 한계 (정직한 평가)
 
 - **80% 대체 가능, 100%는 아님**. Bloomberg/Refinitiv급 실시간 데이터, IBES/FactSet
@@ -118,6 +154,11 @@ Claude Code 재시작 후 자연어로:
 - **트위터(X)** 무료 스크래핑 불가 → Reddit + 네이버 종토방으로 우회.
 - **증권사 회원 전용 PDF** 접근 불가 → 한경컨센서스 공개분 + 2차 인용 뉴스 +
   네이버금융·Yahoo Analysts 컨센서스 메타로 우회.
+- **미국 정식 애널리스트 리포트 본문** 접근 불가 (Goldman, MS 등 모두 paywall) →
+  컨센서스 메타(yfinance) + 2차 인용 뉴스 + Seeking Alpha 컨트리뷰터 헤드라인 +
+  Motley Fool 무료 earnings call 트랜스크립트로 우회.
+- **한국 earnings call 트랜스크립트**는 무료 공개분이 사실상 없음 → DART 사업·분기
+  보고서로 대체. (Motley Fool 같은 한국어 무료 트랜스크립트 사이트 존재 시 추가 예정)
 
 ## 비용
 
