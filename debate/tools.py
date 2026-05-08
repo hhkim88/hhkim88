@@ -166,8 +166,32 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
 ]
 
 
+_dispatch_cache: dict[tuple, Any] = {}
+
+
 def dispatch(name: str, args: dict[str, Any]) -> Any:
-    """Execute a tool call by name. Returns JSON-serializable result."""
+    """Execute a tool call by name. Returns JSON-serializable result.
+
+    Results are memoized per-process keyed on (name, sorted args). External
+    APIs (Yahoo Finance, Google News, Reddit, YouTube) are slow and
+    deterministic for the same query, so Bull and Bear hitting the same
+    company should not double the wait.
+    """
+    try:
+        cache_key = (name, tuple(sorted((k, str(v)) for k, v in args.items())))
+        cached = _dispatch_cache.get(cache_key)
+        if cached is not None:
+            return cached
+    except Exception:
+        cache_key = None  # unhashable args → fall through, no caching
+
+    result = _dispatch_inner(name, args)
+    if cache_key is not None:
+        _dispatch_cache[cache_key] = result
+    return result
+
+
+def _dispatch_inner(name: str, args: dict[str, Any]) -> Any:
     if name == "search_company_news":
         market = args.get("market", "KR")
         fn = news_kr.search_news_kr if market == "KR" else news_us.search_news_us

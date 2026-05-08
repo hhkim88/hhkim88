@@ -7,6 +7,7 @@ Authentication is inherited from Claude Code (Max subscription). No API key requ
 from __future__ import annotations
 
 import anyio
+import asyncio
 import json
 import os
 from dataclasses import dataclass, field
@@ -35,8 +36,8 @@ from .citation import (
     verify_citations,
 )
 
-DEFAULT_MODEL = os.environ.get("DEBATE_MODEL", "claude-sonnet-4-6")
-MODERATOR_MODEL = os.environ.get("MODERATOR_MODEL", "claude-haiku-4-5")
+DEFAULT_MODEL = os.environ.get("DEBATE_MODEL", "claude-haiku-4-5")
+MODERATOR_MODEL = os.environ.get("MODERATOR_MODEL", "claude-sonnet-4-6")
 MAX_TURNS = int(os.environ.get("DEBATE_MAX_TURNS", "12"))
 
 
@@ -449,6 +450,32 @@ async def _run_debate_async(
     for i, kind in enumerate(round_kinds, start=1):
         instr = ROUND_INSTRUCTIONS[kind]
 
+        if kind == "open":
+            # Opening statements are independent — run Bull and Bear concurrently.
+            # In real debates each side presents their case without yet responding
+            # to the other; rebuttal phase comes next.
+            bull_prompt = f"기업: **{company}** (시장: {market})\n\n{instr}"
+            bear_prompt = f"기업: **{company}** (시장: {market})\n\n{instr}"
+            (
+                (bull_text, bull_session, bull_tools, bull_round_items),
+                (bear_text, bear_session, bear_tools, bear_round_items),
+            ) = await asyncio.gather(
+                _agent_run(BULL_SYSTEM, bull_prompt, bull_session, model),
+                _agent_run(BEAR_SYSTEM, bear_prompt, bear_session, model),
+            )
+            bull_pool.extend(bull_round_items)
+            bear_pool.extend(bear_round_items)
+            transcript.append(
+                AgentTurn(role="bull", round_idx=i, round_kind=kind, text=bull_text, tool_calls=bull_tools)
+            )
+            transcript.append(
+                AgentTurn(role="bear", round_idx=i, round_kind=kind, text=bear_text, tool_calls=bear_tools)
+            )
+            last_bull_text = bull_text
+            last_bear_text = bear_text
+            continue
+
+        # Rebuttal/closing rounds depend on the prior turn — sequential.
         bull_prompt = f"기업: **{company}** (시장: {market})\n\n{instr}"
         if last_bear_text:
             bull_prompt += (
