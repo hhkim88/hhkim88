@@ -308,7 +308,7 @@ async def _agent_run(
     options = ClaudeAgentOptions(**options_kwargs)
 
     final_text = ""
-    last_assistant_text = ""
+    final_text_parts: list[str] = []
     new_session = resume_session
     tool_log: list[dict[str, Any]] = []
     by_use_id: dict[str, dict[str, Any]] = {}
@@ -322,8 +322,10 @@ async def _agent_run(
                 new_session = sid
         elif isinstance(msg, AssistantMessage):
             text_parts: list[str] = []
+            has_tool_use = False
             for block in msg.content:
                 if isinstance(block, ToolUseBlock):
+                    has_tool_use = True
                     entry = {
                         "id": block.id,
                         "name": block.name,
@@ -334,10 +336,13 @@ async def _agent_run(
                     by_use_id[block.id] = entry
                 elif isinstance(block, TextBlock):
                     text_parts.append(block.text)
-            if text_parts:
-                # Each AssistantMessage = one model turn. The LAST one carries
-                # the final answer (after any tool calls). Overwriting is correct.
-                last_assistant_text = "".join(text_parts)
+            # Only AssistantMessages without tool use are "final-answer-style"
+            # turns. For tool agents this is the final turn after all tool calls.
+            # For non-tool agents (moderator), every turn qualifies. Sonnet 4.6
+            # may split long responses across multiple such messages, so we
+            # accumulate them in order rather than overwriting.
+            if text_parts and not has_tool_use:
+                final_text_parts.append("".join(text_parts))
         elif isinstance(msg, UserMessage):
             content = msg.content
             if isinstance(content, list):
@@ -360,12 +365,12 @@ async def _agent_run(
             if result_text:
                 final_text = result_text
 
-    # AssistantMessage TextBlocks contain the model's actual generated output.
-    # ResultMessage.result is sometimes truncated for long responses (Sonnet 4.6
-    # was observed to lose all but the last ~1000 chars), so prefer the
-    # AssistantMessage text when present.
-    if last_assistant_text:
-        final_text = last_assistant_text
+    # AssistantMessage TextBlocks (without tool use) contain the model's
+    # final-answer text. Concatenate across messages because Sonnet 4.6 splits
+    # long outputs into multiple AssistantMessages — capturing only the last
+    # one drops earlier sections (observed: DIS moderator missing sections 1-3).
+    if final_text_parts:
+        final_text = "\n".join(final_text_parts)
 
     for entry in tool_log:
         if entry["ok"] is None:
