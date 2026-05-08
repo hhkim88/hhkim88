@@ -18,6 +18,7 @@ from claude_agent_sdk import (
     ClaudeAgentOptions,
     ResultMessage,
     SystemMessage,
+    TextBlock,
     ToolResultBlock,
     ToolUseBlock,
     UserMessage,
@@ -37,7 +38,7 @@ from .citation import (
 )
 
 DEFAULT_MODEL = os.environ.get("DEBATE_MODEL", "claude-sonnet-4-6")
-MODERATOR_MODEL = os.environ.get("MODERATOR_MODEL", "claude-haiku-4-5")
+MODERATOR_MODEL = os.environ.get("MODERATOR_MODEL", "claude-sonnet-4-6")
 MAX_TURNS = int(os.environ.get("DEBATE_MAX_TURNS", "12"))
 
 
@@ -307,6 +308,7 @@ async def _agent_run(
     options = ClaudeAgentOptions(**options_kwargs)
 
     final_text = ""
+    last_assistant_text = ""
     new_session = resume_session
     tool_log: list[dict[str, Any]] = []
     by_use_id: dict[str, dict[str, Any]] = {}
@@ -319,6 +321,7 @@ async def _agent_run(
             if sid:
                 new_session = sid
         elif isinstance(msg, AssistantMessage):
+            text_parts: list[str] = []
             for block in msg.content:
                 if isinstance(block, ToolUseBlock):
                     entry = {
@@ -329,6 +332,12 @@ async def _agent_run(
                     }
                     tool_log.append(entry)
                     by_use_id[block.id] = entry
+                elif isinstance(block, TextBlock):
+                    text_parts.append(block.text)
+            if text_parts:
+                # Each AssistantMessage = one model turn. The LAST one carries
+                # the final answer (after any tool calls). Overwriting is correct.
+                last_assistant_text = "".join(text_parts)
         elif isinstance(msg, UserMessage):
             content = msg.content
             if isinstance(content, list):
@@ -350,6 +359,13 @@ async def _agent_run(
             result_text = getattr(msg, "result", None)
             if result_text:
                 final_text = result_text
+
+    # AssistantMessage TextBlocks contain the model's actual generated output.
+    # ResultMessage.result is sometimes truncated for long responses (Sonnet 4.6
+    # was observed to lose all but the last ~1000 chars), so prefer the
+    # AssistantMessage text when present.
+    if last_assistant_text:
+        final_text = last_assistant_text
 
     for entry in tool_log:
         if entry["ok"] is None:
