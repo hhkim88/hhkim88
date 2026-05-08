@@ -36,8 +36,8 @@ from .citation import (
     verify_citations,
 )
 
-DEFAULT_MODEL = os.environ.get("DEBATE_MODEL", "claude-haiku-4-5")
-MODERATOR_MODEL = os.environ.get("MODERATOR_MODEL", "claude-sonnet-4-6")
+DEFAULT_MODEL = os.environ.get("DEBATE_MODEL", "claude-sonnet-4-6")
+MODERATOR_MODEL = os.environ.get("MODERATOR_MODEL", "claude-haiku-4-5")
 MAX_TURNS = int(os.environ.get("DEBATE_MAX_TURNS", "12"))
 
 
