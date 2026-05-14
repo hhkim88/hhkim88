@@ -19,7 +19,7 @@ from company_search.sources import (
     social,
     youtube,
 )
-from company_search import sentiment
+from company_search import sentiment, ticker
 
 TOOL_SCHEMAS: list[dict[str, Any]] = [
     {
@@ -210,7 +210,9 @@ def _dispatch_inner(name: str, args: dict[str, Any]) -> Any:
             return financials_kr.get_annual_financials(
                 args["company"], year=args.get("year", _dt.utcnow().year - 1)
             )
-        return financials_us.get_fundamentals(args["company"])
+        company = args["company"]
+        resolved = ticker.resolve(company, market="US")
+        return financials_us.get_fundamentals(resolved.ticker if resolved else company)
 
     if name == "get_price_history":
         return price.get_price_history(args["ticker"], days=args.get("days", 365))
