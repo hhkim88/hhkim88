@@ -154,6 +154,50 @@ def _is_internal_tool_reference(raw_label: str, url: str | None) -> bool:
     return any(marker in haystack for marker in _INTERNAL_TOOL_MARKERS)
 
 
+# Third-party entity hint patterns. Catches citations that attribute a claim
+# to a specific actor (broker, analyst, company) reported on by the publisher:
+#   "24/7 Wall St. (JPMorgan 리포트 인용)" -> "JPMorgan"
+#   "MarketBeat (Truist 리포트 인용)"       -> "Truist"
+#   "TipRanks(Scotiabank 목표가 상향)"     -> "Scotiabank"
+#   "TipRanks/Morgan Stanley"              -> "Morgan Stanley"
+#   "Yahoo Finance(Morgan Stanley 보도)"   -> "Morgan Stanley"
+_ENTITY_PAREN_RE = re.compile(
+    r"[\(（]\s*([A-Za-z가-힣&\.\- ]{2,30}?)"
+    r"\s*(?:리포트|리서치|보고서|보도|발표|인용|상향|하향|목표가)",
+)
+_ENTITY_SLASH_LEADING_DIGIT_RE = re.compile(r"^\d+/")
+
+
+def _extract_entity_hint(label: str) -> str | None:
+    """Pull a third-party entity (broker/analyst) hint from a citation label.
+
+    Returns None when the citation is just a publisher reference with no
+    attribution to a specific third party — in that case only the
+    publisher+date check applies (existing behavior)."""
+    m = _ENTITY_PAREN_RE.search(label)
+    if m:
+        return m.group(1).strip()
+
+    # Slash-separated "TipRanks/Morgan Stanley" — skip "24/7"-style publishers
+    if "/" in label and not _ENTITY_SLASH_LEADING_DIGIT_RE.match(label):
+        parts = [p.strip() for p in label.split("/")]
+        if len(parts) >= 2:
+            second = parts[1]
+            if len(second) >= 3 and second[0].isalpha():
+                return second
+    return None
+
+
+def _entity_in_matched_item(entity: str, matched_raw: dict[str, Any]) -> bool:
+    """Case-insensitive substring check on matched article's title + snippet."""
+    ent_norm = _norm(entity)
+    if not ent_norm:
+        return True
+    title_norm = _norm(matched_raw.get("title") or "")
+    snippet_norm = _norm(matched_raw.get("snippet") or "")
+    return ent_norm in title_norm or ent_norm in snippet_norm
+
+
 def _date_compatible(citation_date: str | None, item_date: str) -> bool:
     """Loose date compatibility check. Citation has '2026-01-15' or
     '2026.01.15' or '2026년 1월 15일'. Item published_at is usually
@@ -280,6 +324,24 @@ def verify_citations(
                 notes.append(
                     "source_name 일치"
                     + (f" (후보 {len(sn_matches)}개 중 회사·날짜 점수 최고)" if len(sn_matches) > 1 else "")
+                )
+
+        # Tier 2.5: entity-hint sanity check.
+        # If we matched via publisher (URL or source_name) but the citation
+        # attributes the claim to a specific third party — e.g.,
+        # "24/7 Wall St. (JPMorgan 리포트 인용)" — verify that third party
+        # appears in the matched article's title or snippet. If not, the
+        # publisher+date matched but the matched article is about a
+        # different actor (same publisher published multiple stories that
+        # day). Demote to partial so the discrepancy is visible in the
+        # verification table rather than silently passing as verified.
+        if status == "verified" and match:
+            entity_hint = _extract_entity_hint(c.source_label)
+            if entity_hint and not _entity_in_matched_item(entity_hint, match["raw"]):
+                status = "partial"
+                notes.append(
+                    f"⚠️ 인용은 '{entity_hint}'를 지목했으나 매칭 기사 제목·snippet"
+                    f"에 미발견 — 같은 매체·날짜의 다른 기사일 가능성 (인용 주체 ≠ 매칭 기사 주제)"
                 )
 
         # Tier 3: label appears in some item's snippet/title.
