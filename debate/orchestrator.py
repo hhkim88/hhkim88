@@ -542,12 +542,24 @@ async def _run_debate_async(
     bear_cite_lines = [f"  {idx + 1}. {vc.citation.raw}" for idx, vc in enumerate(bear_verified)]
     bull_dist = source_type_distribution(bull_pool)
     bear_dist = source_type_distribution(bear_pool)
+
+    def _verif_summary(verified: list) -> str:
+        v = sum(1 for x in verified if x.status == "verified")
+        p = sum(1 for x in verified if x.status == "partial")
+        s = sum(1 for x in verified if x.status == "suspect")
+        denom = v + p + s
+        rate = (v + p) / denom if denom else 1.0
+        flag = "  ⚠️ 60% 미만 — 검증율 경고 적용" if rate < 0.60 else ""
+        return f"검증율 {rate:.0%} (✅{v} ⚠️{p} ❌{s}, internal 제외){flag}"
+
     manifest = (
         "## 자동 추출된 인용 (사회자 참고용)\n\n"
         f"Bull 인용 {len(bull_cites)}건:\n"
         + ("\n".join(bull_cite_lines) if bull_cite_lines else "  (없음)")
         + f"\n\nBear 인용 {len(bear_cites)}건:\n"
         + ("\n".join(bear_cite_lines) if bear_cite_lines else "  (없음)")
+        + f"\n\nBull 외부 인용 {_verif_summary(bull_verified)}"
+        + f"\nBear 외부 인용 {_verif_summary(bear_verified)}"
         + f"\n\nBull 외부 풀 분포: {bull_dist or '없음'}"
         + f"\n\nBear 외부 풀 분포: {bear_dist or '없음'}"
     )
