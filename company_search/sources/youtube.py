@@ -42,8 +42,15 @@ def _yt_search(query: str, channels: list[str], max_per_channel: int = 3) -> lis
             f"https://www.youtube.com/{ch}/search?query={query}",
         ]
         try:
-            out = subprocess.run(cmd, capture_output=True, text=True, timeout=45).stdout
-        except (subprocess.TimeoutExpired, FileNotFoundError):
+            out = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=45,
+            ).stdout
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
             continue
         for line in out.splitlines():
             line = line.strip()
