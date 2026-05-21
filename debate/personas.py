@@ -230,6 +230,26 @@ MODERATOR_SYSTEM = """\
   · 동종 ×0.7 이하 → 비관 -3 / 낙관 +5
   · 동종 ×1.5 이상 → 비관 +5 / 낙관 -5
   · 그 사이 → 0/0
+- ⚠️ **데이터 추정 시 밸류에이션 보수화 (필수 — KR 종목에서 빈발)**:
+  PEG·정규화 P/E의 입력값(현재가, trailing EPS, forward EPS, 다년
+  EPS/FCF 시계열)이 토론에 인용된 get_price_history·get_financials·
+  get_consensus **도구 출력으로 직접 추적되지 않고** 사회자·애널리스트가
+  추정·보간한 값이면 아래를 적용한다. 추정 신호 (하나라도 해당):
+  · get_price_history가 errors 필드를 반환했거나 summary.stale=true
+  · get_financials(KR=get_annual_financials)가 error를 반환했거나
+    summary_krw의 매출·영업이익·당기순이익 중 하나라도 결측
+  · forward EPS 또는 다년 EPS/FCF 시계열을 컨센서스·재무 도구에서
+    확보하지 못함
+  적용:
+  ① PEG는 무조건 "적용 불가"로 분류 — 추정값 기반 저평가 PEG로 낙관
+     **+10을 부여하는 것을 금지**한다.
+  ② 정규화 P/E fallback으로 가되 **낙관 칼럼을 최대 +3으로 제한**
+     (위 fallback의 +5 → +3). 비관 칼럼은 그대로 둔다 — 추정 오차는
+     낙관 방향 인플레만 보정하고 위험 신호는 보존한다.
+  ③ fallback의 입력(현재가·EPS)마저 추정값이면 밸류에이션 행을
+     **0/0 (중립)** 으로 둔다.
+  ④ B(현재가 평가) 섹션과 2-5 약점 표에 "재무·시세 데이터 추정 —
+     밸류에이션 신뢰도 하향" 을 명시한다.
 - 단순 "P/E 높으니 비관 +5" 자동 적용 금지. 성장률을 반드시 짝지어 보고
   PEG 산정 후 표 작성.
 - **섹터별 보조 valuation 도구** (해당 섹터의 종목이면 PEG/P/E 외에
