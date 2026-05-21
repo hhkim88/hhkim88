@@ -73,6 +73,11 @@ def _is_failure_payload(result: Any) -> bool:
     if isinstance(result, dict):
         if "error" in result and len(result) <= 2:
             return True
+        # A price/OHLCV-style payload that came back with no rows is a failed
+        # fetch (every source errored or returned empty) — don't pin it for
+        # hours, let the next call retry the FDR/yfinance fallback chain.
+        if "rows" in result and not result["rows"]:
+            return True
     return False
 
 
