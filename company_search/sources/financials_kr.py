@@ -211,6 +211,18 @@ def get_annual_financials(company_name: str, year: int) -> dict[str, Any]:
         rows = data.get("list", []) or []
         fs_div_used = "OFS"
 
+    # DART signals problems through status codes: "000" success, "013" no data,
+    # "100" invalid key, etc. Anything other than success or genuine no-data
+    # is a transient/config error — surface it as an error dict so the cache
+    # layer treats it as a failure and retries on the next call instead of
+    # pinning the bad response for 24h.
+    status = data.get("status")
+    if status not in ("000", "013"):
+        return {
+            "error": f"DART status={status}: {data.get('message', '')}",
+            "company": company_name,
+        }
+
     summary = _extract_summary(rows)
 
     # Best-effort: pull shares outstanding from the dedicated DART endpoint.
