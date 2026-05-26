@@ -122,13 +122,7 @@ def get_shares_outstanding(company_name: str, year: int) -> dict[str, Any]:
     }
 
 
-@cache.cached("dart:financials:v3", ttl=24 * 3600)
-def get_annual_financials(company_name: str, year: int) -> dict[str, Any]:
-    """Single-year consolidated annual financials (사업보고서) plus shares
-    outstanding so the caller can compute PER / PBR / market-cap directly."""
-    corp_code = find_corp_code(company_name)
-    if not corp_code:
-        return {"company": company_name, "year": year, "error": "corp_code not found"}
+def _fetch_dart_financials(corp_code: str, year: int, fs_div: str) -> dict[str, Any]:
     r = requests.get(
         f"{OPENDART_BASE}/fnlttSinglAcntAll.json",
         params={
@@ -136,53 +130,88 @@ def get_annual_financials(company_name: str, year: int) -> dict[str, Any]:
             "corp_code": corp_code,
             "bsns_year": str(year),
             "reprt_code": "11011",  # annual report
-            "fs_div": "CFS",  # consolidated
+            "fs_div": fs_div,
         },
         timeout=30,
     )
     r.raise_for_status()
-    data = r.json()
-    rows = data.get("list", [])
-    summary: dict[str, Any] = {}
-    keep_keys = {
-        "매출액": "revenue",
-        "영업이익": "operating_income",
-        "당기순이익": "net_income",
-        "자산총계": "total_assets",
-        "부채총계": "total_liabilities",
-        "자본총계": "total_equity",
-    }
-    # DART repeats the same account_nm across statement types (BS/IS/CIS/CF/SCE),
-    # often with very different signs and magnitudes. Without filtering we'd
-    # overwrite balance-sheet totals with statement-of-changes-in-equity rows
-    # (which can be negative for net movement). Pin each field to its expected
-    # statement type and prefer the first non-zero match.
-    expected_sj_div = {
-        "revenue": "IS",
-        "operating_income": "IS",
-        "net_income": "IS",
-        "total_assets": "BS",
-        "total_liabilities": "BS",
-        "total_equity": "BS",
-    }
+    return r.json()
+
+
+# Map DART account_nm variants to our canonical fields. Different filers use
+# slightly different names (e.g. financial holdings file "수익(매출액)" instead
+# of "매출액"; some firms tag operating income with "(손실)" suffix).
+_ACCOUNT_NM_MAP: dict[str, str] = {
+    "매출액": "revenue",
+    "수익(매출액)": "revenue",
+    "영업수익": "revenue",
+    "매출": "revenue",
+    "영업이익": "operating_income",
+    "영업이익(손실)": "operating_income",
+    "영업손실": "operating_income",
+    "당기순이익": "net_income",
+    "당기순이익(손실)": "net_income",
+    "당기순손실": "net_income",
+    "자산총계": "total_assets",
+    "부채총계": "total_liabilities",
+    "자본총계": "total_equity",
+}
+
+# DART splits each filing into sj_div sections. Income items live in IS for
+# K-GAAP filers and CIS (포괄손익계산서) for IFRS filers — both must be
+# accepted, otherwise IFRS filers (most KOSPI/KOSDAQ listings) silently lose
+# all revenue / operating income / net income.
+_EXPECTED_SJ_DIV: dict[str, tuple[str, ...]] = {
+    "revenue": ("IS", "CIS"),
+    "operating_income": ("IS", "CIS"),
+    "net_income": ("IS", "CIS"),
+    "total_assets": ("BS",),
+    "total_liabilities": ("BS",),
+    "total_equity": ("BS",),
+}
+
+
+def _extract_summary(rows: list[dict[str, Any]]) -> dict[str, int]:
+    summary: dict[str, int] = {}
     for row in rows:
-        nm = row.get("account_nm", "")
-        if nm not in keep_keys:
+        nm = (row.get("account_nm") or "").strip()
+        target = _ACCOUNT_NM_MAP.get(nm)
+        if not target:
             continue
-        target = keep_keys[nm]
         sj_div = (row.get("sj_div") or "").strip()
-        # If DART supplies sj_div, require the canonical statement type.
-        if sj_div and sj_div != expected_sj_div[target]:
+        if sj_div and sj_div not in _EXPECTED_SJ_DIV[target]:
             continue
         try:
             amt = int((row.get("thstrm_amount") or "0").replace(",", ""))
         except ValueError:
             continue
-        # Prefer the first non-zero hit; don't let later rows overwrite a good
-        # value with 0 or a different statement's number.
         if summary.get(target):
             continue
         summary[target] = amt
+    return summary
+
+
+@cache.cached("dart:financials:v4", ttl=24 * 3600)
+def get_annual_financials(company_name: str, year: int) -> dict[str, Any]:
+    """Single-year annual financials (사업보고서) plus shares outstanding.
+
+    Tries consolidated (CFS) first; falls back to standalone (OFS) for
+    filers without subsidiaries. Income items accept both IS and CIS so
+    K-IFRS filings are not silently dropped.
+    """
+    corp_code = find_corp_code(company_name)
+    if not corp_code:
+        return {"company": company_name, "year": year, "error": "corp_code not found"}
+
+    data = _fetch_dart_financials(corp_code, year, "CFS")
+    rows = data.get("list", []) or []
+    fs_div_used = "CFS"
+    if not rows:
+        data = _fetch_dart_financials(corp_code, year, "OFS")
+        rows = data.get("list", []) or []
+        fs_div_used = "OFS"
+
+    summary = _extract_summary(rows)
 
     # Best-effort: pull shares outstanding from the dedicated DART endpoint.
     # Failure here must not break the financials call.
@@ -210,6 +239,7 @@ def get_annual_financials(company_name: str, year: int) -> dict[str, Any]:
         "company": company_name,
         "corp_code": corp_code,
         "year": year,
+        "fs_div": fs_div_used,
         "status": data.get("status"),
         "message": data.get("message"),
         "summary_krw": summary,
