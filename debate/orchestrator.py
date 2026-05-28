@@ -379,6 +379,35 @@ async def _agent_run(
     return final_text, new_session, tool_log, collect_items
 
 
+async def _agent_run_with_retry(
+    system: str,
+    user_msg: str,
+    resume_session: str | None,
+    model: str,
+    use_tools: bool = True,
+    attempts: int = 3,
+) -> tuple[str, str | None, list[dict[str, Any]], list[dict[str, Any]]]:
+    """Run an agent turn, retrying on transient subprocess/API failures.
+
+    The moderator call is the single largest request (full transcript in,
+    full structured report out) and the most prone to transient overload/
+    network errors. Without retry, one moderator failure discards every
+    completed Bull/Bear round. Backoff: 2s, 4s.
+    """
+    last_exc: Exception | None = None
+    for i in range(attempts):
+        try:
+            return await _agent_run(
+                system, user_msg, resume_session, model, use_tools
+            )
+        except Exception as exc:  # noqa: BLE001 — transient CLI/API errors
+            last_exc = exc
+            if i < attempts - 1:
+                await anyio.sleep(2 * (2 ** i))
+    assert last_exc is not None
+    raise last_exc
+
+
 def _parse_pool_items(tool_name: str, content: Any) -> list[dict[str, Any]]:
     """Extract pool items from any pool-contributing tool result.
 
@@ -575,9 +604,21 @@ async def _run_debate_async(
         f"{manifest}\n\n"
         f"---\n{full_dialogue}\n---"
     )
-    mod_text, _, _, _ = await _agent_run(
-        MODERATOR_SYSTEM, mod_prompt, None, MODERATOR_MODEL, use_tools=False
-    )
+    try:
+        mod_text, _, _, _ = await _agent_run_with_retry(
+            MODERATOR_SYSTEM, mod_prompt, None, MODERATOR_MODEL, use_tools=False
+        )
+    except Exception as exc:  # noqa: BLE001
+        # Preserve the expensive Bull/Bear rounds even if the final synthesis
+        # fails after retries — emit a placeholder so the transcript still
+        # writes out and the user can re-run only the moderation step.
+        mod_text = (
+            "> ⚠️ **사회자 종합 생성 실패** (3회 재시도 후 오류): "
+            f"{str(exc)[:300]}\n\n"
+            "> Bull/Bear 토론 전문은 아래에 그대로 보존되어 있습니다. "
+            "잠시 후 동일 명령으로 재실행하면 캐시된 검색 결과를 재사용하므로 "
+            "검색 비용 없이 토론·종합이 다시 생성됩니다."
+        )
     transcript.append(
         AgentTurn(
             role="moderator",
