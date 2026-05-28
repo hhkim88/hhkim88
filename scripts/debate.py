@@ -45,12 +45,33 @@ def main(argv: list[str] | None = None) -> int:
     from debate.orchestrator import run_debate, DEFAULT_MODEL
     from debate.transcript import to_markdown
 
-    transcript = run_debate(
-        args.company,
-        market=args.market,
-        rounds=args.rounds,
-        model=args.model or DEFAULT_MODEL,
-    )
+    try:
+        transcript = run_debate(
+            args.company,
+            market=args.market,
+            rounds=args.rounds,
+            model=args.model or DEFAULT_MODEL,
+        )
+    except BaseException as exc:
+        # Print an explicit, visible failure report. On Windows + bleeding-edge
+        # Python, an abnormal subprocess/anyio crash can otherwise return to the
+        # shell with no traceback and no output, leaving the user with neither a
+        # file nor a clue. Force the full traceback to stderr and exit non-zero.
+        import traceback
+
+        print(
+            f"\n❌ 토론 실행 실패: {type(exc).__name__}: {exc}\n"
+            "전체 트레이스백:\n",
+            file=sys.stderr,
+        )
+        traceback.print_exc()
+        print(
+            "\n대부분 일시적 오류(API 과부하·네트워크·서브프로세스 크래시)입니다. "
+            "동일 명령으로 재실행하면 캐시된 검색 결과를 재사용해 검색 비용 없이 다시 시도합니다.",
+            file=sys.stderr,
+        )
+        return 1
+
     md = to_markdown(args.company, args.market, transcript)
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)

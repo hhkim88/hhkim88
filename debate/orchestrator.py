@@ -510,8 +510,8 @@ async def _run_debate_async(
                 (bull_text, bull_session, bull_tools, bull_round_items),
                 (bear_text, bear_session, bear_tools, bear_round_items),
             ) = await asyncio.gather(
-                _agent_run(BULL_SYSTEM, bull_prompt, bull_session, model),
-                _agent_run(BEAR_SYSTEM, bear_prompt, bear_session, model),
+                _agent_run_with_retry(BULL_SYSTEM, bull_prompt, bull_session, model),
+                _agent_run_with_retry(BEAR_SYSTEM, bear_prompt, bear_session, model),
             )
             bull_pool.extend(bull_round_items)
             bear_pool.extend(bear_round_items)
@@ -532,7 +532,7 @@ async def _run_debate_async(
                 f"\n\n방금 Bear 애널리스트가 다음과 같이 주장했습니다:\n"
                 f"---\n{last_bear_text[:3000]}\n---"
             )
-        bull_text, bull_session, bull_tools, bull_round_items = await _agent_run(
+        bull_text, bull_session, bull_tools, bull_round_items = await _agent_run_with_retry(
             BULL_SYSTEM, bull_prompt, bull_session, model
         )
         bull_pool.extend(bull_round_items)
@@ -547,7 +547,7 @@ async def _run_debate_async(
                 f"\n\n방금 Bull 애널리스트가 다음과 같이 주장했습니다:\n"
                 f"---\n{last_bull_text[:3000]}\n---"
             )
-        bear_text, bear_session, bear_tools, bear_round_items = await _agent_run(
+        bear_text, bear_session, bear_tools, bear_round_items = await _agent_run_with_retry(
             BEAR_SYSTEM, bear_prompt, bear_session, model
         )
         bear_pool.extend(bear_round_items)
