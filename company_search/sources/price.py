@@ -80,7 +80,20 @@ def _is_fresh(last_date: str, today: Any) -> bool:
     return (today - d).days <= _STALE_DAYS
 
 
-@cache.cached("price:v2", ttl=12 * 3600)
+def _downsample(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Shrink a long daily series so it can't crowd out `summary` when the
+    tool result is truncated by a downstream size limit. Keeps the most
+    recent 90 rows at daily resolution (momentum analysis needs them) and
+    thins everything older to ~weekly. Summary aggregates are computed from
+    the FULL series before this runs, so 52w high/low stay exact."""
+    if len(rows) <= 130:
+        return rows
+    older = rows[:-90][::5]  # every ~5th trading day (weekly) for old data
+    recent = rows[-90:]      # last ~90 days daily
+    return older + recent
+
+
+@cache.cached("price:v3", ttl=12 * 3600)
 def get_price_history(ticker: str, days: int = 365) -> dict[str, Any]:
     end = datetime.utcnow().date()
     start = end - timedelta(days=days)
@@ -118,11 +131,15 @@ def get_price_history(ticker: str, days: int = 365) -> dict[str, Any]:
     if not best_rows:
         return {"ticker": ticker, "days": days, "rows": [], "errors": errors}
 
+    # Compute summary from the FULL series before any downsampling so 52w
+    # high/low and current close stay exact regardless of payload trimming.
     last, first = best_rows[-1], best_rows[0]
     summary: dict[str, Any] = {}
+    is_stale = not _is_fresh(last["date"], end)
     try:
         lows = [r["low"] for r in best_rows if r["low"] > 0]
         summary = {
+            "current_price": last["close"],  # alias: the number callers want
             "first_close": first["close"],
             "last_close": last["close"],
             "pct_change": (last["close"] / first["close"] - 1) * 100
@@ -131,18 +148,28 @@ def get_price_history(ticker: str, days: int = 365) -> dict[str, Any]:
             "high_52w": max(r["high"] for r in best_rows),
             "low_52w": min(lows) if lows else 0.0,
             "last_date": last["date"],
-            "stale": not _is_fresh(last["date"], end),
+            "stale": is_stale,
         }
     except Exception:
         summary = {}
 
+    # ⚠️ Order matters: summary/source/warning come BEFORE the large rows
+    # array so the critical aggregates survive if a downstream layer truncates
+    # the serialized result. rows is downsampled and placed last.
     out: dict[str, Any] = {
         "ticker": ticker,
         "days": days,
-        "rows": best_rows,
-        "summary": summary,
         "source": best_src,
+        "summary": summary,
     }
+    if is_stale:
+        out["warning"] = (
+            f"⚠️ STALE DATA: 최신 가격이 {last['date']} 기준으로 {(end - datetime.strptime(last['date'], '%Y-%m-%d').date()).days}일 "
+            f"경과. current_price({last['close']})를 현재가로 신뢰하지 말 것 — "
+            f"외부 데이터 소스가 최신 시세를 반환하지 못함. 현재가 추정 금지, "
+            f"가격 기반 밸류에이션 신뢰도 하향 처리."
+        )
     if errors:
         out["errors"] = errors  # surfaced even on success, for transparency
+    out["rows"] = _downsample(best_rows)  # large array LAST
     return out
