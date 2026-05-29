@@ -46,17 +46,56 @@ def _corp_code_index() -> dict[str, dict[str, str]]:
     return mapping
 
 
+def _stock_code_to_corp(idx: dict[str, dict[str, str]]) -> dict[str, str]:
+    return {
+        info["stock_code"]: info["corp_code"]
+        for info in idx.values()
+        if info.get("stock_code")
+    }
+
+
 def find_corp_code(company_name: str) -> str | None:
     idx = _corp_code_index()
+
+    # 1. Exact match on DART's official corp_name.
     if company_name in idx:
         return idx[company_name]["corp_code"]
-    for name, info in idx.items():
-        if company_name in name or name in company_name:
-            return info["corp_code"]
-    return None
+
+    # 2. Resolve via the 6-digit KRX stock code. DART's official name often
+    #    differs from the common/FDR short name ("현대자동차" vs "현대차"), and a
+    #    naive substring match then either misses entirely (현대차 is NOT a
+    #    substring of 현대자동차) or latches onto an unrelated listed entity
+    #    (현대차증권) or an unlisted subsidiary with no 사업보고서 → DART
+    #    status 013. Matching on the stock code is unambiguous.
+    q = company_name.strip()
+    stock_code = q if (q.isdigit() and len(q) == 6) else None
+    if stock_code is None:
+        try:
+            from .. import ticker as _ticker
+
+            info = _ticker.resolve(q, market="KR")
+            if info and info.ticker.isdigit() and len(info.ticker) == 6:
+                stock_code = info.ticker
+        except Exception:
+            stock_code = None
+    if stock_code:
+        corp = _stock_code_to_corp(idx).get(stock_code)
+        if corp:
+            return corp
+
+    # 3. Substring fallback, preferring listed companies (stock_code set) so a
+    #    query doesn't resolve to an unlisted subsidiary that files no reports.
+    unlisted_match: str | None = None
+    for name, sub_info in idx.items():
+        if q in name or name in q:
+            if sub_info.get("stock_code"):
+                return sub_info["corp_code"]
+            if unlisted_match is None:
+                unlisted_match = sub_info["corp_code"]
+    return unlisted_match
 
 
-@cache.cached("dart:shares:v1", ttl=24 * 3600)
+@cache.cached("dart:shares:v2", ttl=24 * 3600)
 def get_shares_outstanding(company_name: str, year: int) -> dict[str, Any]:
     """Total issued shares from DART stockTotqySttus.json.
 
@@ -191,7 +230,7 @@ def _extract_summary(rows: list[dict[str, Any]]) -> dict[str, int]:
     return summary
 
 
-@cache.cached("dart:financials:v4", ttl=24 * 3600)
+@cache.cached("dart:financials:v5", ttl=24 * 3600)
 def get_annual_financials(company_name: str, year: int) -> dict[str, Any]:
     """Single-year annual financials (사업보고서) plus shares outstanding.
 
