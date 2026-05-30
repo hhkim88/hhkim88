@@ -210,8 +210,42 @@ _EXPECTED_SJ_DIV: dict[str, tuple[str, ...]] = {
 }
 
 
+# K-IFRS consolidated filings include split rows that contain the canonical
+# name as a substring (e.g. "지배기업 소유주지분 당기순이익", "비지배지분
+# 당기순이익", "기본주당이익"). The substring fallback in _extract_summary must
+# skip these or it will overwrite the consolidated total with one of the
+# components. 현대자동차 surfaces "당기순이익" with annotations that break exact
+# matching but contains the canonical substring; without rejection the loop
+# picks the 지배기업-share row first and net_income stays uncomputable.
+_SPLIT_LINE_TOKENS: tuple[str, ...] = ("지배", "비지배", "주당")
+
+_TARGETS: tuple[str, ...] = (
+    "revenue",
+    "operating_income",
+    "net_income",
+    "total_assets",
+    "total_liabilities",
+    "total_equity",
+)
+
+
+def _parse_amount(s: Any) -> int | None:
+    try:
+        return int(str(s if s is not None else "0").replace(",", "").strip() or "0")
+    except (ValueError, TypeError):
+        return None
+
+
 def _extract_summary(rows: list[dict[str, Any]]) -> dict[str, int]:
+    """Two-pass mapping of DART rows → canonical fields.
+
+    Pass 1 (exact name match) handles the common case. Pass 2 falls back to
+    substring matching for fields still missing, after rejecting split-line
+    variants — needed for K-IFRS filers (e.g. 현대자동차) whose
+    account_nm carries extra annotation that breaks exact equality.
+    """
     summary: dict[str, int] = {}
+
     for row in rows:
         nm = (row.get("account_nm") or "").strip()
         target = _ACCOUNT_NM_MAP.get(nm)
@@ -220,17 +254,40 @@ def _extract_summary(rows: list[dict[str, Any]]) -> dict[str, int]:
         sj_div = (row.get("sj_div") or "").strip()
         if sj_div and sj_div not in _EXPECTED_SJ_DIV[target]:
             continue
-        try:
-            amt = int((row.get("thstrm_amount") or "0").replace(",", ""))
-        except ValueError:
+        if target in summary:
             continue
-        if summary.get(target):
+        amt = _parse_amount(row.get("thstrm_amount"))
+        if amt is None:
             continue
         summary[target] = amt
+
+    missing = [f for f in _TARGETS if f not in summary]
+    if not missing:
+        return summary
+
+    for row in rows:
+        nm = (row.get("account_nm") or "").strip()
+        if any(tok in nm for tok in _SPLIT_LINE_TOKENS):
+            continue
+        sj_div = (row.get("sj_div") or "").strip()
+        for canonical, field in _ACCOUNT_NM_MAP.items():
+            if field not in missing:
+                continue
+            if canonical not in nm:
+                continue
+            if sj_div and sj_div not in _EXPECTED_SJ_DIV[field]:
+                continue
+            amt = _parse_amount(row.get("thstrm_amount"))
+            if amt is None:
+                continue
+            summary[field] = amt
+            missing.remove(field)
+            break
+
     return summary
 
 
-@cache.cached("dart:financials:v5", ttl=24 * 3600)
+@cache.cached("dart:financials:v6", ttl=24 * 3600)
 def get_annual_financials(company_name: str, year: int) -> dict[str, Any]:
     """Single-year annual financials (사업보고서) plus shares outstanding.
 

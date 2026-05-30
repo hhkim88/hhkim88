@@ -93,7 +93,85 @@ def _downsample(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return older + recent
 
 
-@cache.cached("price:v3", ttl=12 * 3600)
+def _pe_percentile_5y(ticker: str, current_close: float) -> dict[str, Any] | None:
+    """Approximate 5-year P/E percentile for a US ticker via yfinance.
+
+    Pairs each annual EPS (yfinance income_stmt) with the year-end close,
+    builds a small P/E sample, and reports where the current P/E sits.
+    KR tickers (6-digit codes) skip — yfinance EPS coverage there is
+    unreliable and DART data is annual-only.
+
+    The moderator's 가격 위치 2차 rule fires on `pe_percentile_5y > 0.9`;
+    surfacing this here means the row stops being silently inactive whenever
+    the agents forget to dig out historical P/E themselves.
+    """
+    if ticker.isdigit() and len(ticker) == 6:
+        return None
+    try:
+        import yfinance as yf
+
+        t = yf.Ticker(ticker)
+        income = getattr(t, "income_stmt", None)
+        if income is None or income.empty:
+            return None
+
+        eps_row = None
+        for key in ("Diluted EPS", "Basic EPS"):
+            if key in income.index:
+                eps_row = income.loc[key]
+                break
+        if eps_row is None:
+            return None
+
+        samples: list[float] = []
+        for col, eps in eps_row.items():
+            try:
+                eps_f = float(eps)
+            except (TypeError, ValueError):
+                continue
+            if eps_f != eps_f or eps_f <= 0:
+                continue
+            try:
+                fye = col.date() if hasattr(col, "date") else col
+                px = t.history(
+                    start=fye, end=fye + timedelta(days=15), auto_adjust=False
+                )
+                if px is None or px.empty:
+                    continue
+                close = float(px["Close"].iloc[0])
+            except Exception:
+                continue
+            if close <= 0:
+                continue
+            samples.append(close / eps_f)
+
+        if len(samples) < 3:
+            return None
+
+        try:
+            current_eps = float(eps_row.iloc[0])
+        except (TypeError, ValueError, IndexError):
+            return None
+        if current_eps != current_eps or current_eps <= 0:
+            return None
+        current_pe = current_close / current_eps
+        if current_pe <= 0:
+            return None
+
+        below = sum(1 for s in samples if s <= current_pe)
+        return {
+            "current_pe": round(current_pe, 2),
+            "sample_size": len(samples),
+            "min_pe": round(min(samples), 2),
+            "median_pe": round(sorted(samples)[len(samples) // 2], 2),
+            "max_pe": round(max(samples), 2),
+            "percentile": round(below / len(samples), 2),
+        }
+    except Exception:
+        return None
+
+
+@cache.cached("price:v4", ttl=12 * 3600)
 def get_price_history(ticker: str, days: int = 365) -> dict[str, Any]:
     end = datetime.utcnow().date()
     start = end - timedelta(days=days)
@@ -152,6 +230,12 @@ def get_price_history(ticker: str, days: int = 365) -> dict[str, Any]:
         }
     except Exception:
         summary = {}
+
+    # Compute 5y P/E percentile best-effort (US only). Failures are silent
+    # — this is a supplemental signal, never the primary price path.
+    pe_pct = _pe_percentile_5y(ticker, last["close"]) if last.get("close") else None
+    if pe_pct:
+        summary["pe_percentile_5y"] = pe_pct
 
     # ⚠️ Order matters: summary/source/warning come BEFORE the large rows
     # array so the critical aggregates survive if a downstream layer truncates
