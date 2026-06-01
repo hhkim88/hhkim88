@@ -236,34 +236,42 @@ def _parse_amount(s: Any) -> int | None:
         return None
 
 
-def _extract_summary(rows: list[dict[str, Any]]) -> dict[str, int]:
+# DART annual filings carry three fiscal years per row (당기/전기/전전기).
+# Extracting all three from one call gives real multi-year CAGR/OPM trends
+# for the moderator's C-0 종목 분류 without any extra API requests.
+_AMOUNT_COLS: dict[str, str] = {
+    "y0": "thstrm_amount",     # 당기 (current fiscal year)
+    "y1": "frmtrm_amount",     # 전기 (prior year)
+    "y2": "bfefrmtrm_amount",  # 전전기 (two years prior)
+}
+
+
+def _match_rows(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     """Two-pass mapping of DART rows → canonical fields.
 
     Pass 1 (exact name match) handles the common case. Pass 2 falls back to
     substring matching for fields still missing, after rejecting split-line
-    variants — needed for K-IFRS filers (e.g. 현대자동차) whose
-    account_nm carries extra annotation that breaks exact equality.
+    variants — needed for K-IFRS filers (e.g. 현대자동차) whose account_nm
+    carries extra annotation that breaks exact equality. A row only matches
+    if its 당기 amount parses, mirroring the original summary behavior.
     """
-    summary: dict[str, int] = {}
+    matched: dict[str, dict[str, Any]] = {}
 
     for row in rows:
         nm = (row.get("account_nm") or "").strip()
         target = _ACCOUNT_NM_MAP.get(nm)
-        if not target:
+        if not target or target in matched:
             continue
         sj_div = (row.get("sj_div") or "").strip()
         if sj_div and sj_div not in _EXPECTED_SJ_DIV[target]:
             continue
-        if target in summary:
+        if _parse_amount(row.get("thstrm_amount")) is None:
             continue
-        amt = _parse_amount(row.get("thstrm_amount"))
-        if amt is None:
-            continue
-        summary[target] = amt
+        matched[target] = row
 
-    missing = [f for f in _TARGETS if f not in summary]
+    missing = [f for f in _TARGETS if f not in matched]
     if not missing:
-        return summary
+        return matched
 
     for row in rows:
         nm = (row.get("account_nm") or "").strip()
@@ -277,17 +285,83 @@ def _extract_summary(rows: list[dict[str, Any]]) -> dict[str, int]:
                 continue
             if sj_div and sj_div not in _EXPECTED_SJ_DIV[field]:
                 continue
-            amt = _parse_amount(row.get("thstrm_amount"))
-            if amt is None:
+            if _parse_amount(row.get("thstrm_amount")) is None:
                 continue
-            summary[field] = amt
+            matched[field] = row
             missing.remove(field)
             break
 
-    return summary
+    return matched
 
 
-@cache.cached("dart:financials:v6", ttl=24 * 3600)
+def _extract_summary(rows: list[dict[str, Any]]) -> dict[str, int]:
+    """Current-year (당기) view — backward compatible with prior callers."""
+    out: dict[str, int] = {}
+    for field, row in _match_rows(rows).items():
+        amt = _parse_amount(row.get("thstrm_amount"))
+        if amt is not None:
+            out[field] = amt
+    return out
+
+
+def _extract_multi_year(rows: list[dict[str, Any]]) -> dict[str, dict[str, int]]:
+    """3-year series {field: {y0, y1, y2}} from a single filing.
+
+    Zero amounts are skipped — in DART data a 0 in 전기/전전기 columns means
+    "not reported", not an actual zero.
+    """
+    out: dict[str, dict[str, int]] = {}
+    for field, row in _match_rows(rows).items():
+        years: dict[str, int] = {}
+        for label, col in _AMOUNT_COLS.items():
+            amt = _parse_amount(row.get(col))
+            if amt:
+                years[label] = amt
+        if years:
+            out[field] = years
+    return out
+
+
+def _classification_signals_kr(multi_year: dict[str, dict[str, int]]) -> dict[str, Any]:
+    """Growth/margin trend signals for the moderator's C-0 종목 분류.
+
+    Mirrors the US classification_signals block but from DART's 3-year
+    columns: revenue CAGR, OPM trend, and a heuristic class hint. The hint
+    never suggests D(사이클) — that requires industry knowledge the
+    moderator applies separately.
+    """
+    signals: dict[str, Any] = {}
+    rev = multi_year.get("revenue", {})
+    oi = multi_year.get("operating_income", {})
+
+    if rev.get("y0") and rev.get("y2") and rev["y2"] > 0:
+        signals["revenue_cagr_2y"] = round((rev["y0"] / rev["y2"]) ** 0.5 - 1, 4)
+
+    if all(rev.get(y) and oi.get(y) for y in ("y0", "y2")):
+        opm0 = oi["y0"] / rev["y0"]
+        opm2 = oi["y2"] / rev["y2"]
+        signals["opm_y0"] = round(opm0, 4)
+        signals["opm_y2"] = round(opm2, 4)
+        signals["opm_trend_bps"] = round((opm0 - opm2) * 10000)
+
+    rev_cagr = signals.get("revenue_cagr_2y")
+    opm_trend = signals.get("opm_trend_bps") or 0
+    if rev_cagr is not None:
+        if rev_cagr < 0:
+            signals["suggested_class"] = "E 턴어라운드 검토 (매출 역성장)"
+        elif rev_cagr > 0.20 and opm_trend >= 500:
+            signals["suggested_class"] = "C 하이퍼그로스"
+        elif rev_cagr > 0.20:
+            signals["suggested_class"] = "B~C (매출 고성장 — 백로그·OPM 추이로 최종 판단)"
+        elif 0.08 <= rev_cagr <= 0.20 and opm_trend > 0:
+            signals["suggested_class"] = "B 컴파운더"
+        else:
+            signals["suggested_class"] = "A 가치/배당"
+
+    return signals
+
+
+@cache.cached("dart:financials:v7", ttl=24 * 3600)
 def get_annual_financials(company_name: str, year: int) -> dict[str, Any]:
     """Single-year annual financials (사업보고서) plus shares outstanding.
 
@@ -320,6 +394,7 @@ def get_annual_financials(company_name: str, year: int) -> dict[str, Any]:
         }
 
     summary = _extract_summary(rows)
+    multi_year = _extract_multi_year(rows)
 
     # Best-effort: pull shares outstanding from the dedicated DART endpoint.
     # Failure here must not break the financials call.
@@ -351,6 +426,10 @@ def get_annual_financials(company_name: str, year: int) -> dict[str, Any]:
         "status": data.get("status"),
         "message": data.get("message"),
         "summary_krw": summary,
+        # 3개년(당기/전기/전전기) 시계열 + C-0 종목 분류 신호. 추가 API
+        # 호출 없이 동일 응답에서 추출되므로 비용 증가 없음.
+        "multi_year_krw": multi_year,
+        "classification_signals": _classification_signals_kr(multi_year),
         "shares_outstanding": shares_block,
         "per_share_krw": derived,
         "raw_count": len(rows),

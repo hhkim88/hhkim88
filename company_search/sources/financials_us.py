@@ -64,7 +64,82 @@ def _valuation_signals(info: dict[str, Any]) -> dict[str, Any]:
     return signals
 
 
-@cache.cached("yf:fundamentals:v2", ttl=24 * 3600)
+def _classification_signals(
+    info: dict[str, Any], statements: dict[str, Any]
+) -> dict[str, Any]:
+    """Multi-year growth/margin signals for the moderator's C-0 종목 분류.
+
+    Computed from realized annual statements (yfinance, newest column first)
+    — never forward estimates, because the matrix variant a stock gets
+    (가치/컴파운더/하이퍼그로스) must not be inflatable by consensus hopes.
+    `suggested_class` is a hint only; the moderator makes the final call
+    (e.g. cyclical industries are classified by sector knowledge, not CAGR).
+    """
+    signals: dict[str, Any] = {}
+
+    income_rows = (statements.get("income") or {}).get("rows", {})
+    cf_rows = (statements.get("cashflow") or {}).get("rows", {})
+
+    def _series(rows: dict[str, Any], *keys: str) -> list[float]:
+        for k in keys:
+            vals = rows.get(k)
+            if vals:
+                clean = [v for v in vals if v is not None and v == v]
+                if len(clean) >= 2:
+                    return clean  # newest first
+        return []
+
+    revenue = _series(income_rows, "Total Revenue", "Operating Revenue")
+    op_inc = _series(income_rows, "Operating Income", "Total Operating Income As Reported")
+    fcf = _series(cf_rows, "Free Cash Flow")
+
+    # Revenue CAGR over the available span (typically 3-4 fiscal years)
+    if len(revenue) >= 3 and revenue[-1] > 0:
+        years = len(revenue) - 1
+        signals["revenue_cagr"] = round((revenue[0] / revenue[-1]) ** (1 / years) - 1, 4)
+        signals["revenue_years_spanned"] = years + 1
+
+    # OPM trend in bps: newest fiscal year vs oldest available
+    if len(revenue) >= 3 and len(op_inc) >= 3:
+        n = min(len(revenue), len(op_inc))
+        if revenue[0] and revenue[n - 1]:
+            opm_new = op_inc[0] / revenue[0]
+            opm_old = op_inc[n - 1] / revenue[n - 1]
+            signals["opm_newest"] = round(opm_new, 4)
+            signals["opm_oldest"] = round(opm_old, 4)
+            signals["opm_trend_bps"] = round((opm_new - opm_old) * 10000)
+
+    # FCF CAGR — only when both endpoints positive (sign flips break CAGR);
+    # a negative→positive flip is itself a hypergrowth marker.
+    if len(fcf) >= 3:
+        if fcf[-1] > 0 and fcf[0] > 0:
+            years = len(fcf) - 1
+            signals["fcf_cagr"] = round((fcf[0] / fcf[-1]) ** (1 / years) - 1, 4)
+        elif fcf[-1] <= 0 < fcf[0]:
+            signals["fcf_turned_positive"] = True
+
+    if info.get("dividendYield") is not None:
+        signals["dividend_yield"] = info.get("dividendYield")
+
+    # Heuristic hint mirroring the moderator's C-0 table (D/E need industry
+    # context the code can't see, so the hint never suggests D).
+    rev_cagr = signals.get("revenue_cagr")
+    opm_trend = signals.get("opm_trend_bps") or 0
+    fcf_cagr = signals.get("fcf_cagr") or 0
+    if rev_cagr is not None:
+        if rev_cagr < 0:
+            signals["suggested_class"] = "E 턴어라운드 검토 (매출 역성장)"
+        elif rev_cagr > 0.20 and (signals.get("fcf_turned_positive") or opm_trend >= 500):
+            signals["suggested_class"] = "C 하이퍼그로스"
+        elif 0.08 <= rev_cagr <= 0.20 and (opm_trend > 0 or fcf_cagr > 0.15):
+            signals["suggested_class"] = "B 컴파운더"
+        else:
+            signals["suggested_class"] = "A 가치/배당"
+
+    return signals
+
+
+@cache.cached("yf:fundamentals:v3", ttl=24 * 3600)
 def get_fundamentals(ticker: str) -> dict[str, Any]:
     import yfinance as yf
 
@@ -125,5 +200,8 @@ def get_fundamentals(ticker: str) -> dict[str, Any]:
         "ticker": ticker,
         "info": info,
         "valuation_signals": valuation_signals,
+        # 종목 분류(C-0)용 다년 실측 신호 — statements보다 앞에 배치해
+        # 다운스트림 truncation에서 살아남도록 한다.
+        "classification_signals": _classification_signals(info, statements),
         "statements": statements,
     }
