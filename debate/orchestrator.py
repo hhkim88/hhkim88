@@ -386,6 +386,7 @@ async def _agent_run_with_retry(
     model: str,
     use_tools: bool = True,
     attempts: int = 3,
+    timeout_s: float = 300.0,
 ) -> tuple[str, str | None, list[dict[str, Any]], list[dict[str, Any]]]:
     """Run an agent turn, retrying on transient subprocess/API failures.
 
@@ -393,14 +394,22 @@ async def _agent_run_with_retry(
     full structured report out) and the most prone to transient overload/
     network errors. Without retry, one moderator failure discards every
     completed Bull/Bear round. Backoff: 2s, 4s.
+
+    Each attempt is wrapped in a per-call timeout because on Windows the
+    claude_agent_sdk subprocess can fail internally ("Fatal error in
+    message reader") without closing its anyio stream — leaving the
+    receive_event.wait() blocked forever. The plain try/except above
+    can't catch that hang; a timeout converts it into a retriable
+    TimeoutError so the loop actually runs.
     """
     last_exc: Exception | None = None
     for i in range(attempts):
         try:
-            return await _agent_run(
-                system, user_msg, resume_session, model, use_tools
-            )
-        except Exception as exc:  # noqa: BLE001 — transient CLI/API errors
+            with anyio.fail_after(timeout_s):
+                return await _agent_run(
+                    system, user_msg, resume_session, model, use_tools
+                )
+        except Exception as exc:  # noqa: BLE001 — transient CLI/API errors + TimeoutError
             last_exc = exc
             if i < attempts - 1:
                 await anyio.sleep(2 * (2 ** i))
