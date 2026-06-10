@@ -27,7 +27,14 @@ from claude_agent_sdk import (
     tool,
 )
 
-from .personas import BEAR_SYSTEM, BULL_SYSTEM, MODERATOR_SYSTEM, ROUND_INSTRUCTIONS
+from .personas import (
+    BEAR_SYSTEM,
+    BULL_SYSTEM,
+    MODERATOR_REPORT_PREAMBLE,
+    MODERATOR_SCORE_PREAMBLE,
+    MODERATOR_SYSTEM,
+    ROUND_INSTRUCTIONS,
+)
 from .tools import dispatch as tool_dispatch
 from .argument_collector import collect_existing_arguments as _collect_args
 from .citation import (
@@ -417,6 +424,145 @@ async def _agent_run_with_retry(
     raise last_exc
 
 
+def _parse_score_json(raw: str) -> dict[str, Any]:
+    """Pull Stage-1 JSON object out of the moderator's response.
+
+    The Stage-1 prompt asks for a single JSON object inside a ```json code
+    fence, but Sonnet sometimes adds a leading sentence or omits the fence.
+    Be tolerant: try the fence first, fall back to the outermost {...}.
+    Raises ValueError if no parseable object is found — the orchestrator
+    treats that as a Stage-1 failure and emits the placeholder.
+    """
+    text = raw.strip()
+    fence_start = text.find("```json")
+    if fence_start != -1:
+        body_start = text.find("\n", fence_start) + 1
+        fence_end = text.find("```", body_start)
+        if fence_end != -1:
+            return json.loads(text[body_start:fence_end].strip())
+
+    # Fallback: greedy outermost braces.
+    first = text.find("{")
+    last = text.rfind("}")
+    if first == -1 or last == -1 or last < first:
+        raise ValueError("no JSON object found in Stage 1 output")
+    return json.loads(text[first : last + 1])
+
+
+def _render_minimal_report_from_score(
+    score: dict[str, Any], stage2_error: str
+) -> str:
+    """Synthesize a minimal markdown report from Stage 1 JSON when Stage 2
+    fails. The user still gets the matrix, classification, recommendation,
+    and debate-winner verdict — the qualitative sections (2-1 through 2-6)
+    are missing but the actionable scoring is preserved.
+
+    This is a fallback path; the full reporter (Stage 2 LLM) writes the
+    proper output when it succeeds.
+    """
+    cls = score.get("classification", {})
+    matrix = score.get("matrix", {})
+    cur = score.get("current_price", {})
+    debate = score.get("debate_winner", {})
+    scen = score.get("scenarios", {})
+    risk = score.get("risk", {})
+    sig = score.get("signals", {})
+
+    def _safe(v: Any, default: str = "—") -> str:
+        return str(v) if v not in (None, "") else default
+
+    lines: list[str] = []
+    lines.append(
+        "> ⚠️ **Stage 2 보고서 작성 실패** — Stage 1 점수는 정상 산출됨. "
+        f"오류: {stage2_error}\n"
+        "> 이하는 Stage 1 JSON에서 자동 생성된 미니멀 보고서입니다. "
+        "전체 마크다운 본문(2-1 합의된 사실 ~ 2-6 핵심 질문)이 누락됐으니 "
+        "동일 명령으로 재실행하면 Stage 2만 다시 시도합니다.\n"
+    )
+    lines.append("## 🎯 TL;DR\n")
+    lines.append("| 항목 | 값 |")
+    lines.append("|---|---|")
+    lines.append(f"| **종목 분류** | {_safe(cls.get('label'))} |")
+    lines.append(f"| **종합 권고** | **{_safe(score.get('recommendation'))}** |")
+    lines.append(f"| **G (낙관−비관)** | **{_safe(matrix.get('final_g'))}pp** |")
+    lines.append(
+        f"| **현재가 평가** | {_safe(cur.get('label'))} "
+        f"({_safe(cur.get('value'))}) |"
+    )
+    lines.append(f"| **핵심 강세** | {_safe(score.get('headline_bull'))} |")
+    lines.append(f"| **핵심 약세** | {_safe(score.get('headline_bear'))} |")
+    lines.append(f"| **결정 트리거** | {_safe(score.get('decision_trigger'))} |")
+    lines.append(
+        f"| **디베이트 우위** | **{_safe(debate.get('verdict'))}** — "
+        f"{_safe(debate.get('reason'))} |"
+    )
+    if score.get("imbalance_flag"):
+        lines.append(f"\n> {score['imbalance_flag']}")
+    if score.get("citation_warning"):
+        lines.append(f"\n> {score['citation_warning']}")
+
+    lines.append("\n## 📊 매트릭스 (C-1)\n")
+    lines.append("| 요인 | 근거 | 비관 ±pp | 낙관 ±pp |")
+    lines.append("|---|---|---:|---:|")
+    for row in matrix.get("rows", []):
+        lines.append(
+            f"| {_safe(row.get('factor'))} | {_safe(row.get('evidence'))} | "
+            f"{_safe(row.get('pessimism'))} | {_safe(row.get('optimism'))} |"
+        )
+    cap = matrix.get("cap_check", {}) or {}
+    cap_note = (
+        f"Bull ❌무시 {cap.get('bull_ignored_bear_core_count', 0)}건 / "
+        f"Bear ❌무시 {cap.get('bear_ignored_bull_core_count', 0)}건 → "
+        f"적용 캡: {_safe(cap.get('applied_cap'))}"
+    )
+    lines.append(
+        f"\n**소계**: 비관 {_safe(matrix.get('subtotal_pessimism'))} / "
+        f"낙관 {_safe(matrix.get('subtotal_optimism'))}\n"
+        f"**정규화 후**: 비관 {_safe(matrix.get('final_pessimism_pct'))}% / "
+        f"낙관 {_safe(matrix.get('final_optimism_pct'))}% / "
+        f"기본 {_safe(matrix.get('final_base_pct'))}%\n"
+        f"**원시 G**: {_safe(matrix.get('raw_g'))}pp · "
+        f"**G 캡**: {cap_note} · **최종 G**: **{_safe(matrix.get('final_g'))}pp**"
+    )
+
+    lines.append("\n## 📅 6개월 시나리오\n")
+    lines.append("| 시나리오 | 목표가 | 확률 | 인용 출처 | 트리거 |")
+    lines.append("|---|---|---|---|---|")
+    for label, key in (("비관", "bearish"), ("기본", "base"), ("낙관", "bullish")):
+        s = scen.get(key, {}) or {}
+        lines.append(
+            f"| {label} | {_safe(s.get('target'))} | "
+            f"{_safe(s.get('probability_pct'))}% | "
+            f"{_safe(s.get('citation'))} | {_safe(s.get('trigger'))} |"
+        )
+
+    lines.append("\n## ⚠️ 리스크 관리\n")
+    lines.append(f"- **손절 검토선**: {_safe(risk.get('stop_loss'))}")
+    lines.append(f"- **추가 매수 지점**: {_safe(risk.get('add_buy'))}")
+    lines.append(
+        f"- **단일 종목 비중 한도**: {_safe(risk.get('position_cap_pct'))}%"
+    )
+
+    buys = sig.get("buy_triggers") or []
+    avoids = sig.get("avoid_triggers") or []
+    if buys or avoids:
+        lines.append("\n## 🚦 진입 / 회피 시그널\n")
+        if buys:
+            lines.append("✅ **매수 진입 권고 신호**:")
+            for s in buys:
+                lines.append(f"- {s}")
+        if avoids:
+            lines.append("\n❌ **즉시 매수 회피 신호**:")
+            for s in avoids:
+                lines.append(f"- {s}")
+
+    lines.append(
+        "\n---\n*Stage 2 LLM 출력 실패로 인용 추적 표·약점 분석 등 "
+        "정성 섹션은 누락됨. Bull/Bear 토론 전문은 아래에 그대로 보존됨.*"
+    )
+    return "\n".join(lines)
+
+
 def _parse_pool_items(tool_name: str, content: Any) -> list[dict[str, Any]]:
     """Extract pool items from any pool-contributing tool result.
 
@@ -613,21 +759,55 @@ async def _run_debate_async(
         f"{manifest}\n\n"
         f"---\n{full_dialogue}\n---"
     )
+    # Two-stage moderator: Stage 1 emits a compact JSON of scores/decisions
+    # (~3K output tokens, very reliable), Stage 2 writes the long markdown
+    # report against that JSON as ground truth (~10K output tokens, less
+    # computation since decisions are settled). Single-shot output was 15K+
+    # tokens and the SDK consistently hung mid-stream on Windows for large
+    # transcripts (VRT, SK하이닉스, 현대차 v4). Splitting halves each call's
+    # output and gives us a fallback path: if Stage 2 fails, the orchestrator
+    # synthesizes a minimal markdown from Stage 1's JSON so the user still
+    # gets the matrix and recommendation.
+    score_system = MODERATOR_SCORE_PREAMBLE + "\n\n" + MODERATOR_SYSTEM
+    report_system = MODERATOR_REPORT_PREAMBLE + "\n\n" + MODERATOR_SYSTEM
+    score_json: dict[str, Any] | None = None
+    mod_text: str | None = None
+
     try:
-        mod_text, _, _, _ = await _agent_run_with_retry(
-            MODERATOR_SYSTEM, mod_prompt, None, MODERATOR_MODEL, use_tools=False
+        score_text, _, _, _ = await _agent_run_with_retry(
+            score_system, mod_prompt, None, MODERATOR_MODEL, use_tools=False
         )
-    except Exception as exc:  # noqa: BLE001
-        # Preserve the expensive Bull/Bear rounds even if the final synthesis
-        # fails after retries — emit a placeholder so the transcript still
-        # writes out and the user can re-run only the moderation step.
+        score_json = _parse_score_json(score_text)
+    except Exception as exc:  # noqa: BLE001 — stage-1 transient failure
         mod_text = (
-            "> ⚠️ **사회자 종합 생성 실패** (3회 재시도 후 오류): "
+            "> ⚠️ **사회자 종합 생성 실패** (Stage 1 점수 산출, 3회 재시도 후 오류): "
             f"{str(exc)[:300]}\n\n"
             "> Bull/Bear 토론 전문은 아래에 그대로 보존되어 있습니다. "
             "잠시 후 동일 명령으로 재실행하면 캐시된 검색 결과를 재사용하므로 "
             "검색 비용 없이 토론·종합이 다시 생성됩니다."
         )
+
+    if mod_text is None and score_json is not None:
+        # Stage 1 succeeded — try Stage 2 to write the long report. If Stage 2
+        # fails, we still have the JSON to fall back on.
+        report_prompt = (
+            f"기업: **{company}** (시장: {market})\n\n"
+            "아래는 Stage 1에서 산출한 매트릭스·분류·시나리오 JSON입니다. "
+            "이를 ground truth로 받아 마크다운 보고서를 작성하세요 "
+            "(점수 재계산 금지, JSON 값 그대로 인용).\n\n"
+            "## Stage 1 JSON (ground truth)\n"
+            "```json\n"
+            f"{json.dumps(score_json, ensure_ascii=False, indent=2)}\n"
+            "```\n\n"
+            f"{manifest}\n\n"
+            f"---\n{full_dialogue}\n---"
+        )
+        try:
+            mod_text, _, _, _ = await _agent_run_with_retry(
+                report_system, report_prompt, None, MODERATOR_MODEL, use_tools=False
+            )
+        except Exception as exc:  # noqa: BLE001 — stage-2 transient failure
+            mod_text = _render_minimal_report_from_score(score_json, str(exc)[:300])
     transcript.append(
         AgentTurn(
             role="moderator",

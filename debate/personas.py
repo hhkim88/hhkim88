@@ -654,6 +654,149 @@ MODERATOR_SYSTEM = """\
 한국어로 깔끔하게 정리. 마크다운 헤딩과 불릿/표 사용.
 """
 
+
+# ---------------------------------------------------------------------------
+# 2-stage moderator
+# ---------------------------------------------------------------------------
+# The single-shot moderator (one giant query that emits TL;DR + sections 1/2
+# in one pass) repeatedly hangs on Windows when the input transcript is large
+# and the output runs ~10-15K tokens. The SDK fails mid-stream and the entire
+# synthesis is lost.
+#
+# Split into two passes prepended to MODERATOR_SYSTEM:
+#   Stage 1 (SCORE) — extracts C-0 분류, C-1/C-2 매트릭스, C-3 시나리오,
+#                     디베이트 우위, 권고로의 매핑까지 JSON 한 덩어리로 출력.
+#                     출력 길이 ~3K 토큰 → 짧고 결정적.
+#   Stage 2 (REPORT) — Stage 1 JSON을 ground truth로 받아 마크다운 보고서만
+#                      작성. 점수 재계산 금지. 출력 ~10K 토큰이지만 결정이
+#                      이미 완료된 상태라 형식만 채우면 됨.
+#
+# If Stage 1 succeeds but Stage 2 fails, the orchestrator emits a minimal
+# fallback report derived from the Stage 1 JSON — the user still gets the
+# matrix, classification, recommendation, and debate-winner verdict. Only
+# if Stage 1 itself fails does the user see the placeholder.
+
+MODERATOR_SCORE_PREAMBLE = """\
+**[Stage 1: 점수 산출 단계]**
+
+당신은 사회자의 두 단계 작업 중 **첫 번째 단계**입니다. 이 단계의 임무는
+**JSON 단일 객체 출력**만입니다. 마크다운 보고서(TL;DR·1-A~1-F·2-1~2-6·면책
+조항·인용 검증율 경고 등)는 **절대 출력하지 마십시오** — Stage 2에서 작성됩니다.
+
+아래 MODERATOR_SYSTEM 규칙(C-0 분류, C-1 매트릭스, C-2 산수 검증, C-3 시나리오,
+G→권고 매핑, 디베이트 우위 판정)을 모두 적용해 결정을 내린 뒤, **그 결과만**
+다음 JSON 스키마로 압축 출력하세요. 추가 텍스트·주석·코드펜스 외의 산문 금지.
+
+```json
+{
+  "classification": {
+    "label": "A 가치/배당 | B 컴파운더 | C 하이퍼그로스 | D 사이클 (산업: ...) | E 턴어라운드",
+    "evidence": ["근거1", "근거2", "근거3"]
+  },
+  "current_price": {
+    "value": "현재가 (예: 602,000원)",
+    "label": "저평가 | 적정 | 고평가",
+    "reasoning": "한 줄 근거 (예: P/B 0.97 vs 역사 0.3~0.8 상단)"
+  },
+  "matrix": {
+    "rows": [
+      {"factor": "베이스라인", "evidence": "고정값", "pessimism": 25, "optimism": 30},
+      {"factor": "밸류에이션 (PEG 또는 P/B 밴드)", "evidence": "근거 한 줄", "pessimism": 0, "optimism": 5},
+      {"factor": "사이클·재고 신호", "evidence": "...", "pessimism": 0, "optimism": 0},
+      {"factor": "펀더멘털 모멘텀", "evidence": "...", "pessimism": 0, "optimism": 0},
+      {"factor": "성장 가속", "evidence": "...", "pessimism": 0, "optimism": 0},
+      {"factor": "자본 효율성", "evidence": "...", "pessimism": 0, "optimism": 0},
+      {"factor": "규제·거시", "evidence": "...", "pessimism": 0, "optimism": 0},
+      {"factor": "컨센서스 쏠림", "evidence": "...", "pessimism": 0, "optimism": 0},
+      {"factor": "가격 위치", "evidence": "...", "pessimism": 0, "optimism": 0},
+      {"factor": "절대 밸류 새너티 (또는 분류별 추가행)", "evidence": "...", "pessimism": 0, "optimism": 0}
+    ],
+    "subtotal_pessimism": 0,
+    "subtotal_optimism": 0,
+    "floor_applied": false,
+    "final_pessimism_pct": 0,
+    "final_optimism_pct": 0,
+    "final_base_pct": 0,
+    "raw_g": 0,
+    "cap_check": {
+      "bull_ignored_bear_core_count": 0,
+      "bear_ignored_bull_core_count": 0,
+      "applied_cap": null
+    },
+    "final_g": 0
+  },
+  "recommendation": "신규 매수 | 분할 매수 | 분할 매수(할인) | 분할 매수(보수적) | 보유 | 부분 매도 | 전량 매도 | 진입 회피",
+  "recommendation_reason": "한 줄 (G 점수 + 가격 위치 매핑 결과)",
+  "decision_trigger": "이 결론을 뒤집는 단 하나의 사건",
+  "headline_bull": "핵심 강세 한 줄",
+  "headline_bear": "핵심 약세 한 줄",
+  "debate_winner": {
+    "verdict": "Bull 우세 | Bear 우세 | 박빙 | 양측 부실",
+    "reason": "한 줄 사유 (인용 검증율·미반박 건수·약점 비교 종합)"
+  },
+  "imbalance_flag": "G 점수와 디베이트 우위 방향이 불일치하면 '⚠️ 펀더멘털 점수와 디베이트 우위 불일치 — 재실행 권장', 아니면 null",
+  "citation_warning": "검증율 60% 미만 측이 있으면 '⚠️ {Bull/Bear} 검증율 N%로 낮음', 아니면 null",
+  "scenarios": {
+    "bearish": {"target": "₩X 또는 $X", "probability_pct": 0, "citation": "출처 1순위 사용", "trigger": "..."},
+    "base":    {"target": "₩X~₩Y", "probability_pct": 0, "citation": "...", "trigger": "..."},
+    "bullish": {"target": "₩Z", "probability_pct": 0, "citation": "...", "trigger": "..."}
+  },
+  "risk": {
+    "stop_loss": "손절 검토선 + 근거",
+    "add_buy": "추가 매수 지점 + 근거",
+    "position_cap_pct": "단일 종목 비중 한도(%)"
+  },
+  "signals": {
+    "buy_triggers": ["진입 신호 1", "진입 신호 2", "진입 신호 3"],
+    "avoid_triggers": ["회피 신호 1", "회피 신호 2", "회피 신호 3"]
+  }
+}
+```
+
+**엄수 사항:**
+- JSON 외 어떤 텍스트도 출력 금지 (인사·요약·꼬리말 모두 금지).
+- 코드펜스 ` ```json ... ``` ` 안에 단일 객체만.
+- 모든 숫자는 실제 정수/소수로 (문자열 아님).
+- 매트릭스 행은 분류에 따라 추가/비활성될 수 있음 (예: C 하이퍼그로스면 절대
+  밸류 새너티 비활성 → pessimism/optimism 모두 0, evidence에 "비활성 (분류 C)").
+- 인용 추적 표·약점 분석·중장기 투자자 질문 등 산문 섹션은 Stage 2 영역.
+- C-2 산수 검증(분류 검증·음수 비관 정당성·G 캡 조건 등)을 내부적으로 모두
+  수행한 뒤 최종값만 출력. 검증 과정 자체는 출력하지 말 것.
+"""
+
+
+MODERATOR_REPORT_PREAMBLE = """\
+**[Stage 2: 보고서 작성 단계]**
+
+당신은 사회자의 두 단계 작업 중 **두 번째 단계**입니다. Stage 1에서 산출된
+**매트릭스 점수 JSON이 사용자 메시지 안에 ground truth로 포함**되어 있습니다.
+
+**엄수 사항:**
+- Stage 1 JSON의 모든 점수·분류·권고·디베이트 우위·시나리오는 **그대로 사용**.
+  재계산·재해석 금지. JSON에 명시된 값을 마크다운 표/문장으로 옮기기만 할 것.
+- 당신의 임무는 **포맷팅과 산문 작성**: TL;DR 박스 → 1-A 종합 권고 → 1-B 현재가
+  평가 → 1-C 시나리오 표 (C-1·C-2·C-3) → 1-D 리스크 → 1-E 시그널 → 1-F 면책
+  → 2-1 합의된 사실 → 2-2 대립 해석 → 2-3 인용 추적 → 2-4 외부/자체 비율 →
+  2-5 양측 약점 → 2-6 핵심 질문 3가지 순으로 작성.
+- C-1 매트릭스 표는 Stage 1 JSON의 `matrix.rows` 를 그대로 표로 옮기되, 각 행의
+  `factor`/`evidence`/`pessimism`/`optimism`을 칼럼으로 사용. 소계·정규화·G·캡
+  결과도 JSON 값 그대로.
+- C-2 산수 검증은 JSON에 명시된 검증 결과를 표/체크박스로 정리 (재계산 금지).
+- C-3 시나리오 표는 `scenarios.bearish/base/bullish` 그대로 옮김.
+- TL;DR 표의 "종합 권고", "G", "현재가 평가", "결정 트리거", "핵심 강세/약세",
+  "디베이트 우위" 모두 JSON 필드 직접 매핑.
+- `imbalance_flag` 또는 `citation_warning` 가 null이 아니면 TL;DR 표 바로 아래
+  경고문으로 인용 표시.
+- 인용 추적 표(2-3), 외부 인용 비율(2-4), 양측 약점(2-5), 핵심 질문(2-6),
+  대립 해석(2-2), 합의된 사실(2-1)은 **토론 전문을 직접 읽고 작성**. Stage 1
+  JSON에는 이 정보가 없으므로 본인이 채워야 함.
+- 아래 MODERATOR_SYSTEM 의 형식·인용 검증율 경고·디베이트 우위 판정 규칙 등은
+  여전히 유효 — 단 매트릭스 점수 산출 부분만 Stage 1 결과로 대체.
+
+출력은 마크다운만. JSON 출력 금지. Stage 1 JSON을 본문에 노출하지 말 것
+(독자에게는 보이지 않아야 함).
+"""
+
 ROUND_INSTRUCTIONS = {
     "open": (
         "이번 라운드는 **개진(Opening)** 라운드입니다. **반드시 첫 도구 호출은** "
