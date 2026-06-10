@@ -322,13 +322,143 @@ def _extract_multi_year(rows: list[dict[str, Any]]) -> dict[str, dict[str, int]]
     return out
 
 
-def _classification_signals_kr(multi_year: dict[str, dict[str, int]]) -> dict[str, Any]:
+# Curated whitelist of KR cyclical large-caps. CAGR/OPM signals alone misread
+# cyclical upcycles as hypergrowth (SK하이닉스 2023→2025: CAGR +72%, OPM
+# +7219bps → suggested_class "C 하이퍼그로스" without this guard). Code → label.
+# Kept conservative: only sectors with documented EPS YoY ±50% history.
+_CYCLICAL_KR_CODES: dict[str, str] = {
+    # 메모리·반도체·반도체장비
+    "000660": "메모리 (SK하이닉스)",
+    "005930": "반도체·전자 (삼성전자)",
+    "042700": "반도체 장비 (한미반도체)",
+    "240810": "반도체 장비 (원익IPS)",
+    "036930": "반도체 장비 (주성엔지니어링)",
+    "357780": "반도체 소재 (솔브레인)",
+    "058470": "반도체 부품 (리노공업)",
+    "095340": "반도체 후공정 (ISC)",
+    "131970": "반도체 패키징 (두산테스나)",
+    "121600": "반도체·디스플레이 소재 (나노신소재)",
+    "005070": "반도체·2차전지 소재 (코스모신소재)",
+    # 자동차·자동차부품
+    "005380": "자동차 (현대차)",
+    "000270": "자동차 (기아)",
+    "012330": "자동차 부품 (현대모비스)",
+    "011210": "자동차 부품 (현대위아)",
+    "161390": "타이어 (한국타이어앤테크놀로지)",
+    "005720": "타이어 (넥센)",
+    # 철강·금속·비철
+    "005490": "철강 (POSCO홀딩스)",
+    "004020": "철강 (현대제철)",
+    "010130": "비철금속 (고려아연)",
+    "005010": "강관 (휴스틸)",
+    "002240": "특수강 (고려제강)",
+    "010520": "철강 (현대비앤지스틸)",
+    # 조선·해운
+    "010140": "조선 (삼성중공업)",
+    "009540": "조선 (HD한국조선해양)",
+    "042660": "조선 (한화오션)",
+    "010620": "조선 (현대미포조선)",
+    "092200": "조선기자재 (HSD엔진)",
+    "011200": "해운 (HMM)",
+    "044450": "해운 (KSS해운)",
+    # 화학·정유·소재
+    "051910": "화학 (LG화학)",
+    "011170": "화학 (롯데케미칼)",
+    "009830": "화학 (한화솔루션)",
+    "010060": "화학 (OCI홀딩스)",
+    "298050": "소재 (효성첨단소재)",
+    "011780": "석유화학 (금호석유)",
+    "096770": "정유 (SK이노베이션)",
+    "010950": "정유 (S-Oil)",
+    "003670": "2차전지 소재 (포스코퓨처엠)",
+    # 건설기계·산업기계
+    "042670": "건설기계 (HD현대인프라코어)",
+    "241560": "건설기계 (두산밥캣)",
+    "267260": "산업기기 (HD현대일렉트릭)",
+    "034020": "발전기자재 (두산에너빌리티)",
+    "000150": "산업기계 (두산)",
+    # 건설
+    "000720": "건설 (현대건설)",
+    "028260": "건설 (삼성물산)",
+    "047040": "건설 (대우건설)",
+    "006360": "건설 (GS건설)",
+    "375500": "건설 (DL이앤씨)",
+    # 시멘트·건자재
+    "003410": "시멘트 (쌍용씨앤이)",
+    "300720": "시멘트 (한일시멘트)",
+    # 디스플레이·전자부품
+    "034220": "디스플레이 (LG디스플레이)",
+    "011070": "전자부품 (LG이노텍)",
+}
+
+# KR industry-name keyword fallback. Matched against FDR `Industry` column
+# when stock code isn't whitelisted. Korean industry names follow KSIC.
+_CYCLICAL_INDUSTRY_KR_KEYWORDS: dict[str, tuple[str, ...]] = {
+    "반도체": ("반도체",),
+    "철강·금속": ("1차 철강", "철강", "비철금속", "금속 광업", "광산", "광물"),
+    "조선·해운": ("선박", "조선", "해상 운송", "해운", "수상"),
+    "화학·정유": ("석유 정제", "기초 화학", "기타 화학", "합성", "고무", "플라스틱", "비료"),
+    "건설기계·산업기계": ("건설용 기계", "특수 목적용 기계", "일반 목적용 기계", "엔진"),
+    "건설": ("종합 건설", "토목 건설", "건축 건설"),
+    "시멘트·건자재": ("시멘트", "비금속 광물"),
+    "자동차": ("자동차"),
+}
+
+
+def _match_cyclical_kr(stock_code: str | None, company_name: str | None) -> str | None:
+    """Return cyclical bucket label if KR stock matches; None otherwise.
+
+    Whitelist beats keyword match. Keyword match queries FDR's KRX listing
+    industry column lazily — failures (no network, missing column) silently
+    return None so non-cyclical stocks still flow through the CAGR/OPM path.
+    """
+    if stock_code and stock_code in _CYCLICAL_KR_CODES:
+        return _CYCLICAL_KR_CODES[stock_code]
+    try:
+        from .. import ticker as _ticker
+
+        df = _ticker._safe_listing(_ticker._kr_listing)
+        if df.empty:
+            return None
+        # FDR uses "Industry" or "industry" — handle both.
+        industry_col = next(
+            (c for c in df.columns if c.lower() == "industry"), None
+        )
+        if not industry_col:
+            return None
+        if stock_code and "Code" in df.columns:
+            row = df[df["Code"].astype(str) == stock_code]
+        elif company_name and "Name" in df.columns:
+            row = df[df["Name"] == company_name]
+        else:
+            return None
+        if row.empty:
+            return None
+        industry = str(row.iloc[0].get(industry_col) or "").strip()
+        if not industry:
+            return None
+        for label, keywords in _CYCLICAL_INDUSTRY_KR_KEYWORDS.items():
+            for kw in keywords:
+                if kw in industry:
+                    return f"{label} (FDR industry: {industry})"
+    except Exception:
+        return None
+    return None
+
+
+def _classification_signals_kr(
+    multi_year: dict[str, dict[str, int]],
+    stock_code: str | None = None,
+    company_name: str | None = None,
+) -> dict[str, Any]:
     """Growth/margin trend signals for the moderator's C-0 종목 분류.
 
-    Mirrors the US classification_signals block but from DART's 3-year
-    columns: revenue CAGR, OPM trend, and a heuristic class hint. The hint
-    never suggests D(사이클) — that requires industry knowledge the
-    moderator applies separately.
+    suggested_class precedence:
+      1. KR cyclical override — whitelist by stock code, FDR-industry keyword
+         fallback. Beats any CAGR/OPM signal. SK하이닉스 in a memory upcycle
+         looks like C 하이퍼그로스 on numbers alone; this guard forces D
+         before the matrix can mis-classify.
+      2. CAGR/OPM heuristic on DART's 3-year columns.
     """
     signals: dict[str, Any] = {}
     rev = multi_year.get("revenue", {})
@@ -344,6 +474,14 @@ def _classification_signals_kr(multi_year: dict[str, dict[str, int]]) -> dict[st
         signals["opm_y2"] = round(opm2, 4)
         signals["opm_trend_bps"] = round((opm0 - opm2) * 10000)
 
+    # Step 1: cyclical industry override (beats CAGR/OPM heuristic).
+    matched = _match_cyclical_kr(stock_code, company_name)
+    if matched:
+        signals["industry_raw"] = matched
+        signals["suggested_class"] = f"D 사이클 (산업 강제: {matched})"
+        return signals
+
+    # Step 2: CAGR/OPM heuristic for non-cyclical industries.
     rev_cagr = signals.get("revenue_cagr_2y")
     opm_trend = signals.get("opm_trend_bps") or 0
     if rev_cagr is not None:
@@ -361,7 +499,25 @@ def _classification_signals_kr(multi_year: dict[str, dict[str, int]]) -> dict[st
     return signals
 
 
-@cache.cached("dart:financials:v7", ttl=24 * 3600)
+def _resolve_stock_code(company_name: str) -> str | None:
+    """Best-effort 6-digit KRX code lookup. Mirrors what find_corp_code does
+    internally, but returns the stock code itself so _classification_signals_kr
+    can hit the cyclical whitelist directly."""
+    q = (company_name or "").strip()
+    if q.isdigit() and len(q) == 6:
+        return q
+    try:
+        from .. import ticker as _ticker
+
+        info = _ticker.resolve(q, market="KR")
+        if info and info.ticker.isdigit() and len(info.ticker) == 6:
+            return info.ticker
+    except Exception:
+        return None
+    return None
+
+
+@cache.cached("dart:financials:v8", ttl=24 * 3600)
 def get_annual_financials(company_name: str, year: int) -> dict[str, Any]:
     """Single-year annual financials (사업보고서) plus shares outstanding.
 
@@ -429,7 +585,11 @@ def get_annual_financials(company_name: str, year: int) -> dict[str, Any]:
         # 3개년(당기/전기/전전기) 시계열 + C-0 종목 분류 신호. 추가 API
         # 호출 없이 동일 응답에서 추출되므로 비용 증가 없음.
         "multi_year_krw": multi_year,
-        "classification_signals": _classification_signals_kr(multi_year),
+        "classification_signals": _classification_signals_kr(
+            multi_year,
+            stock_code=_resolve_stock_code(company_name),
+            company_name=company_name,
+        ),
         "shares_outstanding": shares_block,
         "per_share_krw": derived,
         "raw_count": len(rows),

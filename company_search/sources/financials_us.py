@@ -64,6 +64,81 @@ def _valuation_signals(info: dict[str, Any]) -> dict[str, Any]:
     return signals
 
 
+# Cyclical industry markers — matched against yfinance info['industry'] (and
+# sector as fallback). Keep keywords lowercase. The matched label flows into
+# suggested_class so the moderator can see WHY the override fired and confirm
+# the call against industry knowledge.
+_CYCLICAL_INDUSTRY_KEYWORDS: dict[str, tuple[str, ...]] = {
+    "메모리·반도체": (
+        "semiconductors",
+        "semiconductor equipment",
+        "semiconductor materials",
+    ),
+    "철강·금속": (
+        "steel",
+        "iron",
+        "aluminum",
+        "copper",
+        "gold",  # mining
+        "silver",
+        "metals & mining",
+        "diversified metals",
+    ),
+    "조선·해운": (
+        "marine shipping",
+        "marine transportation",
+        "shipbuilding",
+        "shipping",
+    ),
+    "정유·E&P": (
+        "oil & gas",
+        "oil and gas",
+        "refining",
+        "petroleum",
+    ),
+    "화학": (
+        "chemicals",
+        "specialty chemicals",
+        "basic chemicals",
+    ),
+    "건설기계·산업기계": (
+        "construction machinery",
+        "farm & heavy construction",
+        "industrial machinery",
+        "agricultural & farm machinery",
+        "building products",
+        "construction materials",
+    ),
+    "석탄·에너지원료": (
+        "coal",
+        "thermal coal",
+        "uranium",
+    ),
+    "제지·임산": (
+        "paper",
+        "paper & paper products",
+        "forest products",
+    ),
+    "자동차": (
+        "auto manufacturers",
+        "auto parts",
+    ),
+    "디스플레이·메모리주변": (
+        "consumer electronics",  # OLED·display heavy
+    ),
+}
+
+
+def _match_cyclical_industry(industry: str, sector: str) -> str | None:
+    """Return the cyclical bucket label if industry/sector matches; None otherwise."""
+    haystack = f"{industry} {sector}"
+    for label, keywords in _CYCLICAL_INDUSTRY_KEYWORDS.items():
+        for kw in keywords:
+            if kw in haystack:
+                return label
+    return None
+
+
 def _classification_signals(
     info: dict[str, Any], statements: dict[str, Any]
 ) -> dict[str, Any]:
@@ -72,8 +147,17 @@ def _classification_signals(
     Computed from realized annual statements (yfinance, newest column first)
     — never forward estimates, because the matrix variant a stock gets
     (가치/컴파운더/하이퍼그로스) must not be inflatable by consensus hopes.
-    `suggested_class` is a hint only; the moderator makes the final call
-    (e.g. cyclical industries are classified by sector knowledge, not CAGR).
+
+    suggested_class precedence:
+      1. Cyclical industry override — memory, steel, shipping, refining,
+         chemicals, mining, construction machinery: hard-forced to D
+         regardless of CAGR. Memory chips during an upcycle look like
+         hypergrowth on CAGR/OPM alone (SK하이닉스 2023→2025: CAGR +72%,
+         OPM +7219bps) and silently break the matrix without this guard.
+      2. Otherwise derived from CAGR/OPM/FCF heuristics.
+
+    The moderator is still ultimately responsible for E/D edge cases that
+    require industry knowledge beyond yfinance's `industry` string.
     """
     signals: dict[str, Any] = {}
 
@@ -121,8 +205,16 @@ def _classification_signals(
     if info.get("dividendYield") is not None:
         signals["dividend_yield"] = info.get("dividendYield")
 
-    # Heuristic hint mirroring the moderator's C-0 table (D/E need industry
-    # context the code can't see, so the hint never suggests D).
+    # Step 1: industry-based cyclical override. Beats any CAGR/OPM signal.
+    industry = (info.get("industry") or "").lower()
+    sector = (info.get("sector") or "").lower()
+    matched = _match_cyclical_industry(industry, sector)
+    if matched:
+        signals["industry_raw"] = info.get("industry") or info.get("sector")
+        signals["suggested_class"] = f"D 사이클 (산업 강제: {matched})"
+        return signals
+
+    # Step 2: CAGR/OPM heuristic (only for non-cyclical industries).
     rev_cagr = signals.get("revenue_cagr")
     opm_trend = signals.get("opm_trend_bps") or 0
     fcf_cagr = signals.get("fcf_cagr") or 0
@@ -139,7 +231,7 @@ def _classification_signals(
     return signals
 
 
-@cache.cached("yf:fundamentals:v3", ttl=24 * 3600)
+@cache.cached("yf:fundamentals:v4", ttl=24 * 3600)
 def get_fundamentals(ticker: str) -> dict[str, Any]:
     import yfinance as yf
 
