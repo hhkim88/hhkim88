@@ -46,6 +46,17 @@ from .citation import (
 
 DEFAULT_MODEL = os.environ.get("DEBATE_MODEL", "claude-sonnet-4-6")
 MODERATOR_MODEL = os.environ.get("MODERATOR_MODEL", "claude-sonnet-4-6")
+# Stage 1 (JSON score extraction) runs on Haiku 4.5 by default because the
+# claude_agent_sdk subprocess on Windows consistently times out on Sonnet's
+# 10-30s first-token latency for large transcripts (VRT v3/v4 both failed
+# all 3 retries at Stage 1). Haiku's first-token latency is 1-3s and its
+# streaming behavior is more reliable; its JSON-extraction accuracy is
+# adequate for the matrix scoring task. Stage 2 (long markdown report)
+# stays on Sonnet for prose quality.
+MODERATOR_SCORE_MODEL = os.environ.get(
+    "MODERATOR_SCORE_MODEL", "claude-haiku-4-5-20251001"
+)
+MODERATOR_REPORT_MODEL = os.environ.get("MODERATOR_REPORT_MODEL", MODERATOR_MODEL)
 MAX_TURNS = int(os.environ.get("DEBATE_MAX_TURNS", "12"))
 
 
@@ -775,7 +786,7 @@ async def _run_debate_async(
 
     try:
         score_text, _, _, _ = await _agent_run_with_retry(
-            score_system, mod_prompt, None, MODERATOR_MODEL, use_tools=False
+            score_system, mod_prompt, None, MODERATOR_SCORE_MODEL, use_tools=False
         )
         score_json = _parse_score_json(score_text)
     except Exception as exc:  # noqa: BLE001 — stage-1 transient failure
@@ -804,7 +815,7 @@ async def _run_debate_async(
         )
         try:
             mod_text, _, _, _ = await _agent_run_with_retry(
-                report_system, report_prompt, None, MODERATOR_MODEL, use_tools=False
+                report_system, report_prompt, None, MODERATOR_REPORT_MODEL, use_tools=False
             )
         except Exception as exc:  # noqa: BLE001 — stage-2 transient failure
             mod_text = _render_minimal_report_from_score(score_json, str(exc)[:300])
