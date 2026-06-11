@@ -10,6 +10,7 @@ import anyio
 import asyncio
 import json
 import os
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -481,6 +482,44 @@ async def _anthropic_direct_call(
     return out
 
 
+_URL_RE = re.compile(r"https?://\S+")
+_MD_LINK_RE = re.compile(r"\[([^\]]+)\]\(https?://[^)]+\)")
+
+
+def _compress_for_moderator(dialogue: str) -> str:
+    """Shrink the Bull/Bear transcript before sending it to the moderator.
+
+    The moderator decides scores and writes prose from the *arguments*, not
+    from raw citation URLs. Google News RSS URLs run 200-400 chars each and
+    there are dozens per debate — they bloat the moderator input to ~100K+
+    chars, which is exactly what crashes the claude_agent_sdk subprocess
+    pipe on Windows and slows the HTTP path. Stripping them is lossless for
+    the moderator's purpose: the source NAME stays, only the opaque URL goes.
+
+    - `[text](http://…)` markdown links → just `text`
+    - bare `http://…` tokens → `[url]`
+    - collapse 3+ blank lines to 2
+    """
+    out = _MD_LINK_RE.sub(r"\1", dialogue)
+    out = _URL_RE.sub("[url]", out)
+    out = re.sub(r"\n{3,}", "\n\n", out)
+    return out
+
+
+def _anthropic_key_available() -> bool:
+    """True if an Anthropic API key is set in the environment.
+
+    The HTTP API path needs ANTHROPIC_API_KEY (or ANTHROPIC_AUTH_TOKEN).
+    claude_agent_sdk uses the Claude Code CLI's own stored credentials, so
+    Bull/Bear work without this key — but the direct API client does not.
+    When absent, the moderator must fall back to the SDK path.
+    """
+    return bool(
+        os.environ.get("ANTHROPIC_API_KEY")
+        or os.environ.get("ANTHROPIC_AUTH_TOKEN")
+    )
+
+
 async def _moderator_call_with_retry(
     system: str,
     user_msg: str,
@@ -489,21 +528,51 @@ async def _moderator_call_with_retry(
     attempts: int = 3,
     timeout_s: float = 300.0,
 ) -> str:
-    """Retry wrapper around _anthropic_direct_call mirroring the
-    _agent_run_with_retry pattern (3 attempts, 2/4/8s backoff,
-    per-attempt timeout)."""
+    """Run a moderator stage, preferring the direct Anthropic HTTP API but
+    always falling back to the claude_agent_sdk path so the moderator is
+    never silently dropped.
+
+    Path selection:
+      1. If an Anthropic API key is set → try the HTTP API (3 attempts,
+         2/4/8s backoff). This avoids the Windows SDK subprocess pipe
+         crashes on large transcripts.
+      2. If the API key is absent, OR every HTTP attempt fails (e.g. auth
+         error, network), fall back to the SDK path — the same transport
+         Bull/Bear use, which is already authenticated via the Claude Code
+         CLI in the user's environment.
+
+    The fallback matters because the user may not have ANTHROPIC_API_KEY
+    configured even though their Claude Code CLI is authenticated. Without
+    this, an auth failure left the report empty and the reader had no G
+    score, recommendation, or matrix — i.e. no decision basis at all.
+    """
     last_exc: Exception | None = None
-    for i in range(attempts):
-        try:
-            return await _anthropic_direct_call(
-                system, user_msg, model, max_tokens=max_tokens, timeout_s=timeout_s
-            )
-        except Exception as exc:  # noqa: BLE001 — transient API/network errors
-            last_exc = exc
-            if i < attempts - 1:
-                await anyio.sleep(2 * (2 ** i))
-    assert last_exc is not None
-    raise last_exc
+
+    if _anthropic_key_available():
+        for i in range(attempts):
+            try:
+                return await _anthropic_direct_call(
+                    system, user_msg, model, max_tokens=max_tokens, timeout_s=timeout_s
+                )
+            except Exception as exc:  # noqa: BLE001 — transient API/network/auth
+                last_exc = exc
+                if i < attempts - 1:
+                    await anyio.sleep(2 * (2 ** i))
+        # All HTTP attempts failed — fall through to the SDK path below.
+
+    # SDK fallback (also the only path when no API key is set). Reuses the
+    # Bull/Bear transport with use_tools=False; its own retry+timeout logic
+    # applies. The smaller Stage-1 system prompt (~6K) makes the SDK far
+    # more likely to survive here than the original single-shot 23K prompt.
+    try:
+        text, _, _, _ = await _agent_run_with_retry(
+            system, user_msg, None, model, use_tools=False, timeout_s=timeout_s
+        )
+        return text
+    except Exception as exc:  # noqa: BLE001
+        # Surface whichever error is more informative. If we tried HTTP and
+        # it failed too, prefer the HTTP error (usually the auth message).
+        raise (last_exc or exc)
 
 
 def _parse_score_json(raw: str) -> dict[str, Any]:
@@ -878,6 +947,10 @@ async def _run_debate_async(
     full_dialogue = "\n\n".join(
         f"### Round {t.round_idx} - {t.role.upper()}\n{t.text}" for t in transcript
     )
+    # Strip citation URLs before handing the transcript to the moderator —
+    # they're dead weight for scoring/prose and the main driver of the
+    # oversized input that crashes the SDK pipe / slows the HTTP path.
+    full_dialogue = _compress_for_moderator(full_dialogue)
     mod_prompt = (
         f"기업: **{company}** (시장: {market})\n\n"
         f"아래는 Bull과 Bear 애널리스트의 토론 전문입니다. 정해진 형식대로 정리하세요.\n"
