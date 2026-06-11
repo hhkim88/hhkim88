@@ -31,7 +31,7 @@ from .personas import (
     BEAR_SYSTEM,
     BULL_SYSTEM,
     MODERATOR_REPORT_PREAMBLE,
-    MODERATOR_SCORE_PREAMBLE,
+    MODERATOR_SCORE_SYSTEM,
     MODERATOR_SYSTEM,
     ROUND_INSTRUCTIONS,
 )
@@ -509,26 +509,71 @@ async def _moderator_call_with_retry(
 def _parse_score_json(raw: str) -> dict[str, Any]:
     """Pull Stage-1 JSON object out of the moderator's response.
 
-    The Stage-1 prompt asks for a single JSON object inside a ```json code
-    fence, but Sonnet sometimes adds a leading sentence or omits the fence.
-    Be tolerant: try the fence first, fall back to the outermost {...}.
-    Raises ValueError if no parseable object is found — the orchestrator
-    treats that as a Stage-1 failure and emits the placeholder.
+    Be aggressive about tolerance — Haiku in particular sometimes wraps with
+    ``` (no `json` tag), drops the fence entirely, or prepends a one-line
+    acknowledgement. Try four strategies in order, raising only if all fail:
+      1. ```json … ``` fence
+      2. ``` … ``` fence (any language)
+      3. First {…} object that json.loads cleanly
+      4. Outermost {…} bracket slice (last resort)
     """
     text = raw.strip()
+
+    # Strategy 1: ```json fence.
     fence_start = text.find("```json")
     if fence_start != -1:
         body_start = text.find("\n", fence_start) + 1
         fence_end = text.find("```", body_start)
         if fence_end != -1:
-            return json.loads(text[body_start:fence_end].strip())
+            try:
+                return json.loads(text[body_start:fence_end].strip())
+            except json.JSONDecodeError:
+                pass
 
-    # Fallback: greedy outermost braces.
+    # Strategy 2: any ``` fence.
+    fence_start = text.find("```")
+    if fence_start != -1:
+        body_start = text.find("\n", fence_start) + 1
+        fence_end = text.find("```", body_start)
+        if fence_end != -1:
+            inner = text[body_start:fence_end].strip()
+            try:
+                return json.loads(inner)
+            except json.JSONDecodeError:
+                pass
+
+    # Strategy 3: first {…} that parses cleanly. Walk through every '{' and
+    # try its matching brace, in case there's commentary before the JSON.
+    for i in range(len(text)):
+        if text[i] != "{":
+            continue
+        depth = 0
+        for j in range(i, len(text)):
+            ch = text[j]
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    try:
+                        return json.loads(text[i : j + 1])
+                    except json.JSONDecodeError:
+                        break
+        # If we didn't break-with-success, try the next '{'.
+
+    # Strategy 4: outermost slice (most permissive, may eat trailing chars).
     first = text.find("{")
     last = text.rfind("}")
-    if first == -1 or last == -1 or last < first:
-        raise ValueError("no JSON object found in Stage 1 output")
-    return json.loads(text[first : last + 1])
+    if first != -1 and last != -1 and last > first:
+        try:
+            return json.loads(text[first : last + 1])
+        except json.JSONDecodeError:
+            pass
+
+    raise ValueError(
+        "no JSON object found in Stage 1 output (first 200 chars: "
+        f"{text[:200]!r})"
+    )
 
 
 def _render_minimal_report_from_score(
@@ -850,7 +895,15 @@ async def _run_debate_async(
     # output and gives us a fallback path: if Stage 2 fails, the orchestrator
     # synthesizes a minimal markdown from Stage 1's JSON so the user still
     # gets the matrix and recommendation.
-    score_system = MODERATOR_SCORE_PREAMBLE + "\n\n" + MODERATOR_SYSTEM
+    # Stage 1 uses a dedicated, self-contained score-only system prompt
+    # (~7K chars). Earlier we prepended a preamble to the full MODERATOR_SYSTEM
+    # (~23K total), but the report-templating rules at the tail of
+    # MODERATOR_SYSTEM kept seducing Haiku 4.5 into emitting prose instead of
+    # the required JSON — failing _parse_score_json with "no JSON object
+    # found". The new MODERATOR_SCORE_SYSTEM has only the matrix/scoring
+    # rules + JSON schema, so the JSON-only directive is the only template
+    # the model sees. Stage 2 still gets the report templates for prose.
+    score_system = MODERATOR_SCORE_SYSTEM
     report_system = MODERATOR_REPORT_PREAMBLE + "\n\n" + MODERATOR_SYSTEM
     score_json: dict[str, Any] | None = None
     mod_text: str | None = None
