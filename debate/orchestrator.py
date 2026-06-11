@@ -435,6 +435,77 @@ async def _agent_run_with_retry(
     raise last_exc
 
 
+async def _anthropic_direct_call(
+    system: str,
+    user_msg: str,
+    model: str,
+    max_tokens: int,
+    timeout_s: float,
+) -> str:
+    """Call Claude via the Anthropic HTTP API directly, bypassing the
+    claude_agent_sdk subprocess entirely.
+
+    Why: claude_agent_sdk launches the Claude Code CLI as a child process
+    and pipes prompts via stdin. On Windows, large inputs (~100K+ chars,
+    typical for moderator: 20K system + 80-100K transcript+manifest) hit
+    pipe buffer / streaming limits and consistently crash with "Fatal
+    error in message reader" regardless of model (Sonnet, Haiku — both
+    fail). The HTTP API has no subprocess intermediary, handles arbitrary
+    input sizes, and is the canonical path for non-tool-using calls.
+
+    Used by the moderator (use_tools=False). Bull/Bear personas still go
+    through claude_agent_sdk because they need tool dispatch
+    (collect_existing_arguments, get_financials, etc.).
+    """
+    import anthropic  # local import — only required for moderator path
+
+    client = anthropic.AsyncAnthropic()
+    with anyio.fail_after(timeout_s):
+        message = await client.messages.create(
+            model=model,
+            max_tokens=max_tokens,
+            system=system,
+            messages=[{"role": "user", "content": user_msg}],
+        )
+    parts: list[str] = []
+    for block in message.content:
+        text = getattr(block, "text", None)
+        if text:
+            parts.append(text)
+    out = "".join(parts).strip()
+    if not out:
+        raise RuntimeError(
+            "Anthropic API returned empty content "
+            f"(stop_reason={getattr(message, 'stop_reason', '?')})"
+        )
+    return out
+
+
+async def _moderator_call_with_retry(
+    system: str,
+    user_msg: str,
+    model: str,
+    max_tokens: int,
+    attempts: int = 3,
+    timeout_s: float = 300.0,
+) -> str:
+    """Retry wrapper around _anthropic_direct_call mirroring the
+    _agent_run_with_retry pattern (3 attempts, 2/4/8s backoff,
+    per-attempt timeout)."""
+    last_exc: Exception | None = None
+    for i in range(attempts):
+        try:
+            return await _anthropic_direct_call(
+                system, user_msg, model, max_tokens=max_tokens, timeout_s=timeout_s
+            )
+        except Exception as exc:  # noqa: BLE001 — transient API/network errors
+            last_exc = exc
+            if i < attempts - 1:
+                await anyio.sleep(2 * (2 ** i))
+    assert last_exc is not None
+    raise last_exc
+
+
 def _parse_score_json(raw: str) -> dict[str, Any]:
     """Pull Stage-1 JSON object out of the moderator's response.
 
@@ -785,8 +856,11 @@ async def _run_debate_async(
     mod_text: str | None = None
 
     try:
-        score_text, _, _, _ = await _agent_run_with_retry(
-            score_system, mod_prompt, None, MODERATOR_SCORE_MODEL, use_tools=False
+        # Moderator routed via direct Anthropic HTTP API to avoid the
+        # Windows-side claude_agent_sdk subprocess pipe failures that
+        # killed VRT/SK하이닉스/ETN moderation on every retry.
+        score_text = await _moderator_call_with_retry(
+            score_system, mod_prompt, MODERATOR_SCORE_MODEL, max_tokens=4000
         )
         score_json = _parse_score_json(score_text)
     except Exception as exc:  # noqa: BLE001 — stage-1 transient failure
@@ -814,8 +888,8 @@ async def _run_debate_async(
             f"---\n{full_dialogue}\n---"
         )
         try:
-            mod_text, _, _, _ = await _agent_run_with_retry(
-                report_system, report_prompt, None, MODERATOR_REPORT_MODEL, use_tools=False
+            mod_text = await _moderator_call_with_retry(
+                report_system, report_prompt, MODERATOR_REPORT_MODEL, max_tokens=16000
             )
         except Exception as exc:  # noqa: BLE001 — stage-2 transient failure
             mod_text = _render_minimal_report_from_score(score_json, str(exc)[:300])

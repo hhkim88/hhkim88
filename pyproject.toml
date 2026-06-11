@@ -20,6 +20,7 @@ dependencies = [
     "feedparser>=6.0.11",
     "tenacity>=9.0.0",
     "claude-agent-sdk>=0.1.72",
+    "anthropic>=0.40.0",
 ]
 
 [project.scripts]
