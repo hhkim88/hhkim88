@@ -49,17 +49,20 @@ from .citation import (
 
 DEFAULT_MODEL = os.environ.get("DEBATE_MODEL", "claude-sonnet-4-6")
 MODERATOR_MODEL = os.environ.get("MODERATOR_MODEL", "claude-sonnet-4-6")
-# Stage 1 (JSON score extraction) runs on Haiku 4.5 by default because the
-# claude_agent_sdk subprocess on Windows consistently times out on Sonnet's
-# 10-30s first-token latency for large transcripts (VRT v3/v4 both failed
-# all 3 retries at Stage 1). Haiku's first-token latency is 1-3s and its
-# streaming behavior is more reliable; its JSON-extraction accuracy is
-# adequate for the matrix scoring task. Stage 2 (long markdown report)
-# stays on Sonnet for prose quality.
+# Both moderator stages default to Haiku 4.5 because the claude_agent_sdk
+# subprocess on Windows reliably deadlocks Sonnet 4.6 for the large-input
+# moderator call: VRT/SK하이닉스/현대차/ETN all timed out at Stage 2 on
+# the 16K-token Sonnet report. Stage 1 already proved Haiku survives the
+# same input through SDK; Stage 2 follows the same path. Users with
+# ANTHROPIC_API_KEY set will route through the HTTP API anyway, where
+# Sonnet works — so the only effect of this default is to make the SDK
+# fallback complete instead of hanging.
 MODERATOR_SCORE_MODEL = os.environ.get(
     "MODERATOR_SCORE_MODEL", "claude-haiku-4-5-20251001"
 )
-MODERATOR_REPORT_MODEL = os.environ.get("MODERATOR_REPORT_MODEL", MODERATOR_MODEL)
+MODERATOR_REPORT_MODEL = os.environ.get(
+    "MODERATOR_REPORT_MODEL", "claude-haiku-4-5-20251001"
+)
 MAX_TURNS = int(os.environ.get("DEBATE_MAX_TURNS", "12"))
 
 
