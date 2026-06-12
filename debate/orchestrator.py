@@ -11,6 +11,8 @@ import asyncio
 import json
 import os
 import re
+import sys
+import traceback
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -520,6 +522,41 @@ def _anthropic_key_available() -> bool:
     )
 
 
+def _exc_info(exc: BaseException) -> str:
+    """Produce a non-empty, human-readable description of an exception.
+
+    `str(exc)` is empty for many built-in exceptions raised without args —
+    most notably `TimeoutError` from `anyio.fail_after`, which the moderator
+    stages hit on slow Sonnet responses. That made the user-facing error
+    render as just "오류: " with no clue what went wrong. We fall back through
+    type name → args repr so something diagnostic always surfaces.
+    """
+    type_name = type(exc).__name__
+    msg = str(exc).strip()
+    if msg:
+        return f"{type_name}: {msg}"
+    if exc.args:
+        args_repr = ", ".join(repr(a) for a in exc.args)
+        return f"{type_name}({args_repr})"
+    return type_name
+
+
+def _log_stage_failure(stage: str, exc: BaseException) -> None:
+    """Dump a full traceback for a moderator-stage failure to stderr.
+
+    The minimal fallback report still renders to the user, but it carries
+    only `_exc_info` (one line). The full traceback printed here is what
+    we need to actually diagnose the cause on the next run — Sonnet 4.6
+    has a few distinct failure modes (timeout, 529 overload, empty content,
+    SDK pipe crash) and a one-line summary often can't disambiguate them.
+    """
+    print(
+        f"\n[debate] moderator {stage} failed — full traceback follows:",
+        file=sys.stderr,
+    )
+    traceback.print_exception(type(exc), exc, exc.__traceback__, file=sys.stderr)
+
+
 async def _moderator_call_with_retry(
     system: str,
     user_msg: str,
@@ -652,6 +689,10 @@ def _render_minimal_report_from_score(
     fails. The user still gets the matrix, classification, recommendation,
     and debate-winner verdict — the qualitative sections (2-1 through 2-6)
     are missing but the actionable scoring is preserved.
+
+    `stage2_error` should be the output of `_exc_info(exc)` so that it always
+    carries a type name even when the exception has no message (TimeoutError
+    from `anyio.fail_after` is the common case).
 
     This is a fallback path; the full reporter (Stage 2 LLM) writes the
     proper output when it succeeds.
@@ -990,9 +1031,10 @@ async def _run_debate_async(
         )
         score_json = _parse_score_json(score_text)
     except Exception as exc:  # noqa: BLE001 — stage-1 transient failure
+        _log_stage_failure("Stage 1 (score)", exc)
         mod_text = (
             "> ⚠️ **사회자 종합 생성 실패** (Stage 1 점수 산출, 3회 재시도 후 오류): "
-            f"{str(exc)[:300]}\n\n"
+            f"{_exc_info(exc)[:300]}\n\n"
             "> Bull/Bear 토론 전문은 아래에 그대로 보존되어 있습니다. "
             "잠시 후 동일 명령으로 재실행하면 캐시된 검색 결과를 재사용하므로 "
             "검색 비용 없이 토론·종합이 다시 생성됩니다."
@@ -1017,8 +1059,18 @@ async def _run_debate_async(
             mod_text = await _moderator_call_with_retry(
                 report_system, report_prompt, MODERATOR_REPORT_MODEL, max_tokens=16000
             )
+            # SDK fallback can return empty string without raising. Treat that
+            # as a Stage-2 failure too — otherwise the moderator section ends
+            # up blank with no error message, exactly the symptom that masked
+            # the v5 SK하이닉스 silent failure.
+            if not (mod_text and mod_text.strip()):
+                raise RuntimeError(
+                    "Stage 2 returned empty content "
+                    "(no exception raised; SDK or HTTP path produced no text)"
+                )
         except Exception as exc:  # noqa: BLE001 — stage-2 transient failure
-            mod_text = _render_minimal_report_from_score(score_json, str(exc)[:300])
+            _log_stage_failure("Stage 2 (report)", exc)
+            mod_text = _render_minimal_report_from_score(score_json, _exc_info(exc)[:300])
     transcript.append(
         AgentTurn(
             role="moderator",
