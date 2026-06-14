@@ -1,0 +1,12 @@
+# 크롤링 결과/캐시
+data/
+*.csv
+!tests/fixtures/*.csv
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.ipynb_checkpoints/
