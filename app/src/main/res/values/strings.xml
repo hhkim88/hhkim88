@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">오타교정 키보드</string>
+    <string name="corrections_title">학습된 오타 목록</string>
+
+    <string name="main_intro_title">나만의 오타를 학습하는 키보드</string>
+    <string name="main_intro_body">써봤던 오타를 지우고 다시 쳐서 완성한 문장을 보내면, 이 키보드가 \'오타 → 정답\' 패턴을 기기 안에만 저장해서 학습해요. 같은 오타를 또 내면 자동으로 고쳐줍니다. 모든 데이터는 이 기기에만 저장되고 외부로 전송되지 않아요.</string>
+
+    <string name="step1_title">1. 키보드 활성화하기</string>
+    <string name="step1_body">설정 &gt; 시스템 &gt; 언어 및 입력 &gt; 화면 키보드에서 \'오타교정 키보드\'를 켜주세요.</string>
+    <string name="step1_button">키보드 설정 열기</string>
+
+    <string name="step2_title">2. 입력할 때 이 키보드로 전환하기</string>
+    <string name="step2_body">아무 텍스트창이나 눌렀을 때 나오는 키보드 전환 버튼으로 \'오타교정 키보드\'를 선택하세요.</string>
+    <string name="step2_button">키보드 전환하기</string>
+
+    <string name="step3_title">3. 학습된 오타 확인하기</string>
+    <string name="step3_body">쓸수록 나만의 오타 사전이 쌓여요. 목록에서 각 항목을 켜고 끄거나 지울 수 있어요.</string>
+    <string name="step3_button">학습된 오타 보기</string>
+
+    <string name="corrections_empty">아직 학습된 오타가 없어요.\n키보드로 입력하다가 오타를 지우고 다시 쳐서 보내면 여기에 쌓입니다.</string>
+    <string name="corrections_delete">삭제</string>
+    <string name="corrections_count_format">%1$d회 관찰됨</string>
+
+    <string name="autocorrect_hint_format">%1$s → %2$s (탭하여 되돌리기)</string>
+
+    <string name="key_delete">지움</string>
+    <string name="key_space">스페이스</string>
+    <string name="key_enter">입력</string>
+    <string name="key_symbols">기호</string>
+    <string name="key_hangul">한글</string>
+    <string name="key_shift">시프트</string>
+</resources>
