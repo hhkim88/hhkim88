@@ -34,9 +34,14 @@ class TypoKeyboardService : InputMethodService(), KeyboardActionListener {
 
     private lateinit var keyboardView: KeyboardView
     private lateinit var statusStrip: TextView
+    private lateinit var autoCorrectToggle: TextView
 
     private data class AutoCorrectRecord(val original: String, val applied: String, val trailing: String)
     private var lastAutoCorrect: AutoCorrectRecord? = null
+
+    // Not persisted on purpose: a quick, thumb-reachable pause for auto-correct, not a permanent
+    // setting. Learning keeps happening while paused; only the auto-apply step is skipped.
+    private var autoCorrectEnabled = true
 
     override fun onCreate() {
         super.onCreate()
@@ -58,15 +63,63 @@ class TypoKeyboardService : InputMethodService(), KeyboardActionListener {
             setPadding(dp(12), dp(8), dp(12), dp(8))
             visibility = View.GONE
             setOnClickListener { revertLastAutoCorrect() }
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+        }
+
+        // Always-visible, thumb-reachable pause button: sits directly above the keys (right
+        // where thumbs already rest while typing), not tucked into a settings screen.
+        autoCorrectToggle = TextView(this).apply {
+            textSize = 13f
+            gravity = Gravity.CENTER
+            setPadding(dp(14), dp(10), dp(14), dp(10))
+            contentDescription = getString(R.string.autocorrect_toggle_description)
+            setOnClickListener {
+                autoCorrectEnabled = !autoCorrectEnabled
+                updateToggleAppearance()
+            }
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply {
+                marginStart = dp(8)
+                marginEnd = dp(8)
+                topMargin = dp(4)
+                bottomMargin = dp(4)
+                gravity = Gravity.CENTER_VERTICAL
+            }
+        }
+        updateToggleAppearance()
+
+        val topBar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setBackgroundColor(ContextCompat.getColor(context, R.color.strip_background))
+            addView(statusStrip)
+            addView(autoCorrectToggle)
         }
 
         keyboardView = KeyboardView(this).apply {
             listener = this@TypoKeyboardService
         }
 
-        container.addView(statusStrip)
+        container.addView(topBar)
         container.addView(keyboardView)
         return container
+    }
+
+    private fun updateToggleAppearance() {
+        autoCorrectToggle.text = getString(
+            if (autoCorrectEnabled) R.string.autocorrect_toggle_on else R.string.autocorrect_toggle_off
+        )
+        autoCorrectToggle.setBackgroundResource(
+            if (autoCorrectEnabled) R.drawable.toggle_on_background else R.drawable.toggle_off_background
+        )
+        autoCorrectToggle.setTextColor(
+            ContextCompat.getColor(
+                this,
+                if (autoCorrectEnabled) R.color.toggle_on_text else R.color.toggle_off_text
+            )
+        )
     }
 
     override fun onStartInputView(info: EditorInfo?, restarting: Boolean) {
@@ -147,7 +200,8 @@ class TypoKeyboardService : InputMethodService(), KeyboardActionListener {
             return
         }
 
-        val suggestion = correctionEngine.suggestCorrection(typedWord)
+        // Learning always happens (above); only the auto-apply step respects the pause toggle.
+        val suggestion = if (autoCorrectEnabled) correctionEngine.suggestCorrection(typedWord) else null
         val finalWord = suggestion ?: typedWord
         ic.setComposingText(finalWord, 1)
         ic.finishComposingText()

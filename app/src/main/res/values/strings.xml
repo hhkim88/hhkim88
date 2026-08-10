@@ -23,6 +23,9 @@
     <string name="corrections_count_format">%1$d회 관찰됨</string>
 
     <string name="autocorrect_hint_format">%1$s → %2$s (탭하여 되돌리기)</string>
+    <string name="autocorrect_toggle_on">자동교정 ON</string>
+    <string name="autocorrect_toggle_off">자동교정 OFF</string>
+    <string name="autocorrect_toggle_description">자동교정 켜기/끄기</string>
 
     <string name="key_delete">지움</string>
     <string name="key_space">스페이스</string>
