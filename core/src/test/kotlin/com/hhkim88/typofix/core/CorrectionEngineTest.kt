@@ -53,6 +53,15 @@ class CorrectionEngineTest {
     }
 
     @Test
+    fun `confirming a suggestion immediately reaches full confidence`() {
+        val engine = CorrectionEngine(InMemoryCorrectionStore(), minConfidenceCount = 2)
+        assertNull(engine.suggestCorrection("안뇽"))
+
+        engine.confirmSuggestion("안뇽", "안녕")
+        assertEquals("안녕", engine.suggestCorrection("안뇽"))
+    }
+
+    @Test
     fun `forgetting a correction removes it`() {
         val engine = CorrectionEngine(InMemoryCorrectionStore(), minConfidenceCount = 1)
         engine.observeSelfCorrection(TypoCandidate("ㅇㅇ", "응응"))

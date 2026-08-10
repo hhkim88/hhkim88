@@ -9,8 +9,10 @@ import android.widget.TextView
 import androidx.core.content.ContextCompat
 import com.hhkim88.typofix.R
 import com.hhkim88.typofix.core.CorrectionEngine
+import com.hhkim88.typofix.core.DictionarySuggester
 import com.hhkim88.typofix.core.HangulComposer
 import com.hhkim88.typofix.core.WordAttemptTracker
+import com.hhkim88.typofix.core.WordListDictionary
 import com.hhkim88.typofix.data.AppDatabase
 import com.hhkim88.typofix.data.RoomCorrectionStore
 import kotlinx.coroutines.CoroutineScope
@@ -22,7 +24,16 @@ import kotlinx.coroutines.cancel
  * The whole app in one place: a custom Hangul keyboard that (a) types, and (b) watches how the
  * user edits each word before finishing it, learning personal typo -> correction pairs and
  * auto-applying them once confident. See com.hhkim88.typofix.core for the reusable, unit-tested
- * logic (Hangul composition, word-attempt tracking, correction confidence).
+ * logic (Hangul composition, word-attempt tracking, correction confidence, dictionary matching).
+ *
+ * Two independent correction signals feed into the same word-boundary decision:
+ *  - Personal memory ([CorrectionEngine.suggestCorrection]): a typo this exact user has
+ *    self-corrected before, confident enough to auto-apply silently.
+ *  - Dictionary plausibility ([DictionarySuggester]): a word that was never self-corrected
+ *    (no personal history at all) but doesn't look like a real word, and is unambiguously close
+ *    to exactly one real one. This is only ever shown as a tappable suggestion, never applied
+ *    silently, since "not in a small seed dictionary" is much weaker evidence than "this exact
+ *    user fixed this exact typo before".
  */
 class TypoKeyboardService : InputMethodService(), KeyboardActionListener {
 
@@ -31,13 +42,27 @@ class TypoKeyboardService : InputMethodService(), KeyboardActionListener {
     private val composer = HangulComposer()
     private val tracker = WordAttemptTracker()
     private lateinit var correctionEngine: CorrectionEngine
+    private lateinit var dictionarySuggester: DictionarySuggester
 
     private lateinit var keyboardView: KeyboardView
     private lateinit var statusStrip: TextView
     private lateinit var autoCorrectToggle: TextView
 
-    private data class AutoCorrectRecord(val original: String, val applied: String, val trailing: String)
-    private var lastAutoCorrect: AutoCorrectRecord? = null
+    private enum class WordActionMode { REVERT_AUTOCORRECT, APPLY_SUGGESTION }
+
+    /**
+     * What's currently sitting right before the cursor, and what tapping the status strip would
+     * do about it. [committedText] is what's actually in the text field right now; [alternativeText]
+     * is what tapping would swap it for.
+     */
+    private data class WordAction(
+        val committedText: String,
+        val trailing: String,
+        val alternativeText: String,
+        val mode: WordActionMode
+    )
+
+    private var pendingWordAction: WordAction? = null
 
     // Not persisted on purpose: a quick, thumb-reachable pause for auto-correct, not a permanent
     // setting. Learning keeps happening while paused; only the auto-apply step is skipped.
@@ -48,7 +73,13 @@ class TypoKeyboardService : InputMethodService(), KeyboardActionListener {
         val dao = AppDatabase.get(applicationContext).typoCorrectionDao()
         val store = RoomCorrectionStore(dao, serviceScope)
         correctionEngine = CorrectionEngine(store)
+        dictionarySuggester = DictionarySuggester(WordListDictionary(loadBundledDictionary()))
     }
+
+    private fun loadBundledDictionary(): List<String> =
+        assets.open(DICTIONARY_ASSET).bufferedReader().useLines { lines ->
+            lines.map { it.trim() }.filter { it.isNotEmpty() && !it.startsWith("#") }.toList()
+        }
 
     override fun onCreateInputView(): View {
         val container = LinearLayout(this).apply {
@@ -56,13 +87,11 @@ class TypoKeyboardService : InputMethodService(), KeyboardActionListener {
         }
 
         statusStrip = TextView(this).apply {
-            setBackgroundColor(ContextCompat.getColor(context, R.color.strip_background))
-            setTextColor(ContextCompat.getColor(context, R.color.strip_text))
             textSize = 14f
             gravity = Gravity.CENTER_VERTICAL
             setPadding(dp(12), dp(8), dp(12), dp(8))
             visibility = View.GONE
-            setOnClickListener { revertLastAutoCorrect() }
+            setOnClickListener { handleStripTap() }
             layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
         }
 
@@ -126,8 +155,8 @@ class TypoKeyboardService : InputMethodService(), KeyboardActionListener {
         super.onStartInputView(info, restarting)
         composer.reset()
         tracker.reset()
-        lastAutoCorrect = null
-        hideAutoCorrectHint()
+        pendingWordAction = null
+        hideWordActionStrip()
     }
 
     override fun onFinishInputView(finishingInput: Boolean) {
@@ -136,7 +165,8 @@ class TypoKeyboardService : InputMethodService(), KeyboardActionListener {
         // mutate the host app's text at a moment when focus may already be gone.
         correctionEngine.observeSelfCorrection(tracker.finalizeWord())
         composer.reset()
-        hideAutoCorrectHint()
+        pendingWordAction = null
+        hideWordActionStrip()
     }
 
     override fun onDestroy() {
@@ -166,7 +196,8 @@ class TypoKeyboardService : InputMethodService(), KeyboardActionListener {
             ic.deleteSurroundingText(1, 0)
             tracker.reset()
         }
-        hideAutoCorrectHint()
+        pendingWordAction = null
+        hideWordActionStrip()
     }
 
     override fun onSpace() {
@@ -195,48 +226,88 @@ class TypoKeyboardService : InputMethodService(), KeyboardActionListener {
         if (typedWord.isEmpty()) {
             composer.reset()
             if (trailing.isNotEmpty()) ic.commitText(trailing, 1)
-            lastAutoCorrect = null
-            hideAutoCorrectHint()
+            pendingWordAction = null
+            hideWordActionStrip()
             return
         }
 
-        // Learning always happens (above); only the auto-apply step respects the pause toggle.
-        val suggestion = if (autoCorrectEnabled) correctionEngine.suggestCorrection(typedWord) else null
-        val finalWord = suggestion ?: typedWord
-        ic.setComposingText(finalWord, 1)
+        // Learning always happens (above); only auto-apply / suggesting respects the pause toggle.
+        val autoCorrection = if (autoCorrectEnabled) correctionEngine.suggestCorrection(typedWord) else null
+        val committedWord = autoCorrection ?: typedWord
+        ic.setComposingText(committedWord, 1)
         ic.finishComposingText()
         if (trailing.isNotEmpty()) ic.commitText(trailing, 1)
 
-        if (suggestion != null) {
-            lastAutoCorrect = AutoCorrectRecord(typedWord, suggestion, trailing)
-            showAutoCorrectHint(typedWord, suggestion)
-        } else {
-            lastAutoCorrect = null
-            hideAutoCorrectHint()
+        when {
+            autoCorrection != null -> {
+                pendingWordAction = WordAction(committedWord, trailing, typedWord, WordActionMode.REVERT_AUTOCORRECT)
+                showAutoCorrectedStrip(typedWord, autoCorrection)
+            }
+            autoCorrectEnabled -> {
+                val suggestion = dictionarySuggester.suggest(typedWord)
+                if (suggestion != null) {
+                    pendingWordAction = WordAction(committedWord, trailing, suggestion, WordActionMode.APPLY_SUGGESTION)
+                    showSuggestionStrip(typedWord, suggestion)
+                } else {
+                    pendingWordAction = null
+                    hideWordActionStrip()
+                }
+            }
+            else -> {
+                pendingWordAction = null
+                hideWordActionStrip()
+            }
         }
         composer.reset()
     }
 
-    private fun revertLastAutoCorrect() {
-        val record = lastAutoCorrect ?: return
+    private fun handleStripTap() {
+        when (pendingWordAction?.mode) {
+            WordActionMode.REVERT_AUTOCORRECT -> revertAutoCorrect()
+            WordActionMode.APPLY_SUGGESTION -> applySuggestion()
+            null -> Unit
+        }
+    }
+
+    private fun revertAutoCorrect() {
+        val action = pendingWordAction?.takeIf { it.mode == WordActionMode.REVERT_AUTOCORRECT } ?: return
         val ic = currentInputConnection ?: return
-        ic.deleteSurroundingText(record.applied.length + record.trailing.length, 0)
-        ic.commitText(record.original + record.trailing, 1)
-        correctionEngine.forget(record.original)
-        lastAutoCorrect = null
-        hideAutoCorrectHint()
+        ic.deleteSurroundingText(action.committedText.length + action.trailing.length, 0)
+        ic.commitText(action.alternativeText + action.trailing, 1)
+        correctionEngine.forget(action.alternativeText)
+        pendingWordAction = null
+        hideWordActionStrip()
+    }
+
+    private fun applySuggestion() {
+        val action = pendingWordAction?.takeIf { it.mode == WordActionMode.APPLY_SUGGESTION } ?: return
+        val ic = currentInputConnection ?: return
+        ic.deleteSurroundingText(action.committedText.length + action.trailing.length, 0)
+        ic.commitText(action.alternativeText + action.trailing, 1)
+        correctionEngine.confirmSuggestion(action.committedText, action.alternativeText)
+        pendingWordAction = null
+        hideWordActionStrip()
     }
 
     private fun updateComposingDisplay() {
         currentInputConnection?.setComposingText(composer.text, 1)
     }
 
-    private fun showAutoCorrectHint(typo: String, correction: String) {
+    private fun showAutoCorrectedStrip(typo: String, correction: String) {
         statusStrip.text = getString(R.string.autocorrect_hint_format, typo, correction)
+        statusStrip.setBackgroundColor(ContextCompat.getColor(this, R.color.strip_background))
+        statusStrip.setTextColor(ContextCompat.getColor(this, R.color.strip_text))
         statusStrip.visibility = View.VISIBLE
     }
 
-    private fun hideAutoCorrectHint() {
+    private fun showSuggestionStrip(typo: String, suggestion: String) {
+        statusStrip.text = getString(R.string.suggestion_hint_format, typo, suggestion)
+        statusStrip.setBackgroundColor(ContextCompat.getColor(this, R.color.suggestion_background))
+        statusStrip.setTextColor(ContextCompat.getColor(this, R.color.suggestion_text))
+        statusStrip.visibility = View.VISIBLE
+    }
+
+    private fun hideWordActionStrip() {
         statusStrip.visibility = View.GONE
     }
 
@@ -244,6 +315,8 @@ class TypoKeyboardService : InputMethodService(), KeyboardActionListener {
         (value * resources.displayMetrics.density).toInt()
 
     companion object {
+        private const val DICTIONARY_ASSET = "common_words_ko.txt"
+
         private val PERFORMABLE_ACTIONS = setOf(
             EditorInfo.IME_ACTION_SEND,
             EditorInfo.IME_ACTION_GO,

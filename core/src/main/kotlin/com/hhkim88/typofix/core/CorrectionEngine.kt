@@ -20,6 +20,17 @@ class CorrectionEngine(
         store.recordAttempt(candidate.typo, candidate.correction)
     }
 
+    /**
+     * Call when the user explicitly accepts a [DictionarySuggester] suggestion (tapped it, rather
+     * than it being inferred from their own backspacing). That's stronger evidence than a single
+     * inferred self-correction, so it's recorded at full confidence immediately instead of making
+     * the user confirm the same word twice before it starts auto-correcting.
+     */
+    fun confirmSuggestion(typo: String, correction: String) {
+        if (typo == correction) return
+        repeat(minConfidenceCount) { store.recordAttempt(typo, correction) }
+    }
+
     fun suggestCorrection(word: String): String? {
         val match = store.lookup(word) ?: return null
         if (!match.enabled) return null

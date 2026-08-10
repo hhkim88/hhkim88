@@ -15,4 +15,7 @@
     <color name="toggle_on_text">#FFFFFF</color>
     <color name="toggle_off_background">#B0BEC5</color>
     <color name="toggle_off_text">#263238</color>
+
+    <color name="suggestion_background">#FFF3E0</color>
+    <color name="suggestion_text">#E65100</color>
 </resources>
