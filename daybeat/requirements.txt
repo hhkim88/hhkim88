@@ -1,0 +1,4 @@
+numpy
+soundfile
+webrtcvad-wheels
+resemblyzer
